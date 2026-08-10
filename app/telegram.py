@@ -1,7 +1,6 @@
 import httpx
 
-from family_finance_mvp.app.config import settings
-
+from app.config import settings
 
 class TelegramError(RuntimeError):
     pass
