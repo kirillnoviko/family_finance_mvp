@@ -4,9 +4,8 @@ import logging
 from fastapi import FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
-from family_finance_mvp.app.config import settings
-from family_finance_mvp.app.telegram import TelegramError, send_message
-
+from app.config import settings
+from app.telegram import TelegramError, send_message
 
 logging.basicConfig(
     level=logging.INFO,
