@@ -1,0 +1,23 @@
+Validation performed before packaging:
+
+1. Python syntax compilation
+   Command: python -m py_compile app/*.py
+   Result: PASS
+
+2. Unit tests
+   Command: python -m pytest -q
+   Result: 3 passed
+   Coverage targets:
+   - 7 real Priorbank SMS examples supplied in the conversation
+   - family / marketing / reserve report calculations
+   - duplicate SMS protection
+
+3. FastAPI/Uvicorn startup smoke test
+   Result: PASS
+   Application startup completed successfully and listened on the configured port.
+   Telegram webhook was intentionally disabled in the local smoke test by leaving APP_BASE_URL empty.
+
+Not tested locally:
+- Live Telegram Bot API calls (requires the user's real bot token)
+- Railway deployment/network/volume (must be verified after redeploy)
+- iPhone Shortcut -> Railway delivery (already worked with the previous MVP and should keep the same endpoint contract)
