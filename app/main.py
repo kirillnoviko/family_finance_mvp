@@ -1,98 +1,59 @@
-import hmac
-import logging
-
-from fastapi import FastAPI, Header, HTTPException, status
-from pydantic import BaseModel, Field
-
+import csv,hmac,io,logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI,Header,HTTPException,Request,status
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel,Field
 from app.config import settings
-from app.telegram import TelegramError, send_message
+from app.db import create_sms_transaction,export_rows,init_db
+from app.parser import parse_priorbank_sms
+from app.telegram import TelegramError,handle_update,send_transaction_for_classification,setup_webhook
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
-logger = logging.getLogger("family-finance")
+logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(name)s %(message)s')
+logger=logging.getLogger('family-finance')
 
-app = FastAPI(
-    title="Family Finance Bot",
-    version="0.1.0",
-    docs_url="/docs",
-    redoc_url=None,
-)
+@asynccontextmanager
+async def lifespan(app):
+    init_db()
+    try: await setup_webhook()
+    except Exception: logger.exception('Could not configure Telegram webhook')
+    yield
 
+app=FastAPI(title='Family Finance Bot',version='1.0.0-mvp',docs_url='/docs',redoc_url=None,lifespan=lifespan)
 
 class SmsRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=3500)
-    device: str = Field(default="wife", min_length=1, max_length=50)
+    message:str=Field(min_length=1,max_length=5000)
+    device:str=Field(default='wife',min_length=1,max_length=50)
 
+def verify_bearer(auth):
+    if not auth: raise HTTPException(status_code=401,detail='Missing Authorization header')
+    if not auth.startswith('Bearer '): raise HTTPException(status_code=401,detail='Authorization must use Bearer scheme')
+    if not hmac.compare_digest(auth[7:].strip(),settings.api_secret): raise HTTPException(status_code=403,detail='Invalid API secret')
 
-class SmsResponse(BaseModel):
-    ok: bool
-    telegram_message_id: int
+@app.get('/health')
+async def health(): return {'status':'ok','version':'1.0.0-mvp'}
 
+@app.post('/api/sms')
+async def receive_sms(request:SmsRequest,authorization:str|None=Header(default=None)):
+    verify_bearer(authorization)
+    try: parsed=parse_priorbank_sms(request.message)
+    except ValueError as exc: raise HTTPException(status_code=422,detail=str(exc))
+    tx,created=create_sms_transaction(request.device,parsed)
+    if not created: return {'ok':True,'duplicate':True,'transaction_id':tx.id}
+    try: await send_transaction_for_classification(tx)
+    except TelegramError as exc: logger.exception('Telegram send failed'); raise HTTPException(status_code=502,detail=str(exc))
+    return {'ok':True,'duplicate':False,'transaction_id':tx.id,'parsed':{'amount':str(parsed.amount),'currency':parsed.currency,'direction':parsed.direction,'operation_hint':parsed.operation_hint,'merchant':parsed.merchant,'card':parsed.card_mask,'balance_after':str(parsed.balance_after) if parsed.balance_after is not None else None}}
 
-def verify_authorization(authorization: str | None) -> None:
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing Authorization header",
-        )
+@app.post('/telegram/webhook')
+async def telegram_webhook(request:Request,x_telegram_bot_api_secret_token:str|None=Header(default=None)):
+    if settings.telegram_webhook_secret and not (x_telegram_bot_api_secret_token and hmac.compare_digest(x_telegram_bot_api_secret_token,settings.telegram_webhook_secret)):
+        raise HTTPException(status_code=403,detail='Invalid Telegram webhook secret')
+    await handle_update(await request.json()); return {'ok':True}
 
-    prefix = "Bearer "
-    if not authorization.startswith(prefix):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization must use Bearer scheme",
-        )
-
-    supplied_secret = authorization[len(prefix):].strip()
-
-    if not hmac.compare_digest(supplied_secret, settings.api_secret):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid API secret",
-        )
-
-
-@app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.post("/api/sms", response_model=SmsResponse)
-async def receive_sms(
-    request: SmsRequest,
-    authorization: str | None = Header(default=None),
-) -> SmsResponse:
-    verify_authorization(authorization)
-
-    logger.info(
-        "Received SMS event from device=%s, message_length=%d",
-        request.device,
-        len(request.message),
-    )
-
-    telegram_text = (
-        "💳 Новая операция\n\n"
-        f"{request.message}\n\n"
-        f"📱 Источник: {request.device}"
-    )
-
-    try:
-        telegram_message_id = await send_message(telegram_text)
-    except TelegramError:
-        logger.exception("Failed to send message to Telegram")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Failed to send message to Telegram",
-        )
-
-    logger.info(
-        "SMS forwarded to Telegram, telegram_message_id=%d",
-        telegram_message_id,
-    )
-
-    return SmsResponse(
-        ok=True,
-        telegram_message_id=telegram_message_id,
-    )
+@app.get('/api/export.csv',response_class=PlainTextResponse)
+async def export_csv(authorization:str|None=Header(default=None)):
+    verify_bearer(authorization); rows=export_rows(); out=io.StringIO()
+    if rows:
+        fields=list(rows[0].keys())+['amount','balance_after']; w=csv.DictWriter(out,fieldnames=fields); w.writeheader()
+        for r in rows:
+            r=dict(r); r['amount']=f"{r['amount_minor']/100:.2f}"; r['balance_after']='' if r.get('balance_after_minor') is None else f"{r['balance_after_minor']/100:.2f}"; w.writerow(r)
+    return PlainTextResponse(out.getvalue(),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename="family-finance.csv"'})
