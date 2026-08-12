@@ -153,3 +153,13 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -q
 ```
+
+
+## v1.1
+
+- Starting balances for Family / Marketing / Reserve (НЗ) are stored separately and do not create transactions.
+- Marketing and Reserve balances show approximate USD and EUR equivalents using the official NBRB exchange-rate API.
+- Statistics has period buttons: current 15→14, previous 15→14, current month, previous month, last 30 days, custom dates.
+- Persistent Telegram keyboard: Add, Statistics, Balances, Pending, Help.
+- Bot command menu is configured automatically with setMyCommands.
+- Existing SQLite data is preserved; new tables are created automatically.

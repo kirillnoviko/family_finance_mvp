@@ -1,4 +1,4 @@
-import hashlib, sqlite3
+import hashlib, sqlite3, json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -40,6 +40,17 @@ def init_db():
           id INTEGER PRIMARY KEY AUTOINCREMENT, merchant_pattern TEXT NOT NULL UNIQUE, scope TEXT NOT NULL,
           operation_type TEXT NOT NULL, category_code TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           FOREIGN KEY(category_code) REFERENCES categories(code));
+        CREATE TABLE IF NOT EXISTS opening_balances(
+          bucket TEXT PRIMARY KEY,
+          amount_minor INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS user_states(
+          user_id INTEGER PRIMARY KEY,
+          state TEXT NOT NULL,
+          payload_json TEXT NOT NULL DEFAULT '{}',
+          updated_at TEXT NOT NULL
+        );
         ''')
         for c in CATEGORIES:
             con.execute('''INSERT INTO categories(code,title,emoji,scope,kind,parent_code) VALUES(?,?,?,?,?,?)
@@ -112,3 +123,72 @@ def all_reserve_transactions(end_iso=None):
 
 def export_rows():
     with connect() as con: return [dict(r) for r in con.execute('''SELECT id,occurred_at,amount_minor,currency,direction,operation_type,physical_account,scope,category_code,source,merchant,description,balance_after_minor,origin,status FROM transactions ORDER BY occurred_at DESC''').fetchall()]
+
+
+def set_opening_balance(bucket, amount):
+    if bucket not in {'family','marketing','reserve'}:
+        raise ValueError('Unknown bucket')
+    with connect() as con:
+        con.execute(
+            """INSERT INTO opening_balances(bucket,amount_minor,updated_at)
+               VALUES(?,?,?)
+               ON CONFLICT(bucket) DO UPDATE SET
+                 amount_minor=excluded.amount_minor,
+                 updated_at=excluded.updated_at""",
+            (bucket,to_minor(amount),now_iso())
+        )
+
+def get_opening_balance(bucket):
+    with connect() as con:
+        row=con.execute(
+            'SELECT amount_minor FROM opening_balances WHERE bucket=?',
+            (bucket,)
+        ).fetchone()
+        return int(row['amount_minor']) if row else 0
+
+def get_opening_balances():
+    return {
+        'family':get_opening_balance('family'),
+        'marketing':get_opening_balance('marketing'),
+        'reserve':get_opening_balance('reserve'),
+    }
+
+def set_user_state(user_id,state,payload=None):
+    with connect() as con:
+        con.execute(
+            """INSERT INTO user_states(user_id,state,payload_json,updated_at)
+               VALUES(?,?,?,?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 state=excluded.state,
+                 payload_json=excluded.payload_json,
+                 updated_at=excluded.updated_at""",
+            (user_id,state,json.dumps(payload or {},ensure_ascii=False),now_iso())
+        )
+
+def get_user_state(user_id):
+    with connect() as con:
+        row=con.execute(
+            'SELECT state,payload_json FROM user_states WHERE user_id=?',
+            (user_id,)
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            payload=json.loads(row['payload_json'])
+        except Exception:
+            payload={}
+        return {'state':row['state'],'payload':payload}
+
+def clear_user_state(user_id):
+    with connect() as con:
+        con.execute('DELETE FROM user_states WHERE user_id=?',(user_id,))
+
+def query_all_transactions(end_iso=None):
+    sql="SELECT * FROM transactions WHERE status='categorized'"
+    params=[]
+    if end_iso:
+        sql+=' AND occurred_at<?'
+        params.append(end_iso)
+    sql+=' ORDER BY occurred_at'
+    with connect() as con:
+        return [tx_from_row(r) for r in con.execute(sql,params).fetchall()]
