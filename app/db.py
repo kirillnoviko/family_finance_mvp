@@ -198,7 +198,7 @@ def query_transactions(start_iso,end_iso):
     with connect() as con: return [tx_from_row(r) for r in con.execute("SELECT * FROM transactions WHERE occurred_at>=? AND occurred_at<? AND status='categorized' ORDER BY occurred_at",(start_iso,end_iso)).fetchall()]
 
 def all_reserve_transactions(end_iso=None):
-    sql="SELECT * FROM transactions WHERE status='categorized' AND category_code IN ('reserve_contribution','reserve_to_family')"; params=[]
+    sql="SELECT * FROM transactions WHERE status='categorized' AND category_code IN ('reserve_contribution','reserve_from_family','reserve_to_family')"; params=[]
     if end_iso: sql+=' AND occurred_at<?'; params.append(end_iso)
     with connect() as con: return [tx_from_row(r) for r in con.execute(sql+' ORDER BY occurred_at',params).fetchall()]
 

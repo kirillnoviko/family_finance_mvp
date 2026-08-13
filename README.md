@@ -220,3 +220,42 @@ Telegram keeps showing the original amount, plus the BYN equivalent, for example
 `≈ 30.xx BYN по курсу НБРБ на 2026-08-05`
 
 Reports and balances use the stored BYN equivalent, so historical totals remain stable when exchange rates change later.
+
+
+## v1.4 — operation journal
+
+A new persistent Telegram button `📋 Операции` shows categorized transactions by:
+
+- Family
+- Marketing
+- Reserve (НЗ)
+
+The user chooses the same period presets used by statistics. Results are shown newest first and contain:
+
+`DD.MM HH:MM | signed amount | merchant/description`
+
+Foreign-currency items show the original currency and stored BYN equivalent. Reserve entries are displayed from the reserve perspective as `Маркетинг → НЗ` and `НЗ → Семья`.
+
+The list is paginated at 15 items per page and can switch between Family / Marketing / НЗ while preserving the selected period.
+
+
+## v1.5 — reserve sources + reconciled statistics
+
+Reserve can now be funded from either logical contour:
+
+- `🏠 Семья → НЗ`
+- `📈 Маркетинг → НЗ`
+
+Both are allocations/transfers between internal contours. They do not inflate expenses or income:
+the source balance decreases and the reserve balance increases by exactly the same amount.
+
+Statistics now use the same balance engine as `💰 Балансы`.
+Each report shows:
+
+- balance at the beginning of the selected period
+- period inflows/outflows
+- reserve movements
+- net change during the period
+- balance at the end of the selected period
+
+For a current period whose end is today or later, `Баланс на конец` matches the corresponding value in `💰 Балансы` because both are calculated by the same function.

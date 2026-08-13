@@ -7,7 +7,7 @@ from app.categories import BY_CODE,children,roots,title
 from app.config import settings
 from app.db import (
     clear_user_state,create_manual_transaction,create_sms_transaction,find_rule,get_transaction,get_user_state,
-    list_pending,reset_transaction,save_rule,set_opening_balance,set_telegram_message,
+    list_pending,query_transactions,reset_transaction,save_rule,set_opening_balance,set_telegram_message,
     set_user_state,update_transaction
 )
 from app.exchange import convert_byn,convert_foreign_to_byn,get_byn_rates
@@ -28,8 +28,8 @@ def main_keyboard():
     return {
         'keyboard':[
             [{'text':'➕ Добавить'},{'text':'📊 Статистика'}],
-            [{'text':'💰 Балансы'},{'text':'⏳ Разобрать'}],
-            [{'text':'ℹ️ Помощь'}]
+            [{'text':'📋 Операции'},{'text':'💰 Балансы'}],
+            [{'text':'⏳ Разобрать'},{'text':'ℹ️ Помощь'}]
         ],
         'resize_keyboard':True,
         'is_persistent':True
@@ -74,6 +74,7 @@ async def setup_webhook():
         {'command':'start','description':'Главное меню'},
         {'command':'add','description':'Добавить операцию'},
         {'command':'stats','description':'Статистика'},
+        {'command':'operations','description':'Список операций'},
         {'command':'balances','description':'Балансы'},
         {'command':'pending','description':'Неразобранные операции'},
         {'command':'help','description':'Помощь'}
@@ -131,7 +132,7 @@ def category_keyboard(tx,scope):
     if tx.direction=='in':
         cats=[BY_CODE['salary_kirill'],BY_CODE['salary_wife'],BY_CODE['family_other_income'],BY_CODE['reserve_to_family']] if scope=='family' else [BY_CODE['marketing_client_income'],BY_CODE['marketing_other_income']]
     else:
-        cats=[BY_CODE['assistant_salary'],BY_CODE['tax'],BY_CODE['business_expense'],BY_CODE['reserve_contribution']] if scope=='marketing' else roots('family','expense')
+        cats=[BY_CODE['assistant_salary'],BY_CODE['tax'],BY_CODE['business_expense'],BY_CODE['reserve_contribution']] if scope=='marketing' else roots('family','expense')+[BY_CODE['reserve_from_family']]
     rows=[]
     for i in range(0,len(cats),2):
         rows.append([b(f'{c.emoji} {c.title}',f'cat:{tx.id}:{c.code}') for c in cats[i:i+2]])
@@ -163,6 +164,12 @@ def initial_keyboard(tx):
 def finalized_text(tx):
     scope='🏠 Семья' if tx.scope=='family' else '📈 Маркетинг' if tx.scope=='marketing' else '🔄 Внутренний'
     lines=['✅ Операция учтена','',header(tx),'',f'Контур: {scope}',f'Категория: {title(tx.category_code)}']
+    if tx.category_code=='reserve_contribution':
+        lines.append('Перемещение: 📈 Маркетинг → 🛡 НЗ')
+    elif tx.category_code=='reserve_from_family':
+        lines.append('Перемещение: 🏠 Семья → 🛡 НЗ')
+    elif tx.category_code=='reserve_to_family':
+        lines.append('Перемещение: 🛡 НЗ → 🏠 Семья')
     if tx.source and not tx.source.startswith(('telegram:','system:')): lines.append(f'Источник: {tx.source}')
     return '\n'.join(lines)
 
@@ -176,8 +183,108 @@ def manual_flow_keyboard():
     return markup([
         [b('🏠 Расход семьи','manual:family_expense'),b('🏠 Доход семьи','manual:family_income')],
         [b('📈 Расход маркетинга','manual:marketing_expense'),b('📈 Доход маркетинга','manual:marketing_income')],
-        [b('🛡 Перевести в НЗ','manual:reserve_in'),b('🏠 Из НЗ семье','manual:reserve_out')]
+        [b('🏠 Семья → НЗ','manual:reserve_from_family'),b('📈 Маркетинг → НЗ','manual:reserve_from_marketing')],
+        [b('🛡 НЗ → Семья','manual:reserve_out')]
     ])
+
+
+def operations_scope_keyboard():
+    return markup([
+        [b('🏠 Семья','opscope:family'),b('📈 Маркетинг','opscope:marketing')],
+        [b('🛡 НЗ','opscope:reserve')]
+    ])
+
+def operations_periods_keyboard(scope):
+    return markup([
+        [b('📅 Текущий 15→14',f'opperiod:{scope}:current'),b('◀️ Прошлый 15→14',f'opperiod:{scope}:previous')],
+        [b('🗓 Этот месяц',f'opperiod:{scope}:month'),b('◀️ Прошлый месяц',f'opperiod:{scope}:prevmonth')],
+        [b('30 дней',f'opperiod:{scope}:30'),b('✏️ Свой период',f'opperiod:{scope}:custom')]
+    ])
+
+def _operations_for_scope(scope,start,end):
+    items=query_transactions(start.isoformat(),end.isoformat())
+    if scope=='reserve':
+        items=[t for t in items if t.category_code in {'reserve_contribution','reserve_from_family','reserve_to_family'}]
+    else:
+        items=[t for t in items if t.scope==scope]
+    return list(reversed(items))
+
+def _operation_name(tx,scope):
+    if scope=='reserve':
+        if tx.category_code=='reserve_contribution':
+            return 'Маркетинг → НЗ'
+        if tx.category_code=='reserve_from_family':
+            return 'Семья → НЗ'
+        if tx.category_code=='reserve_to_family':
+            return 'НЗ → Семья'
+    name=(tx.merchant or tx.description or tx.source or '').strip()
+    if name and not name.startswith(('telegram:','system:')):
+        return name
+    return title(tx.category_code) if tx.category_code else 'Операция'
+
+def _operation_amount(tx,scope):
+    if scope=='reserve':
+        sign='+' if tx.category_code in {'reserve_contribution','reserve_from_family'} else '-'
+    else:
+        sign='+' if tx.direction=='in' else '-'
+
+    if tx.currency!='BYN':
+        original=f'{sign}{tx.amount:.2f} {tx.currency}'
+        if tx.amount_byn is not None:
+            return f'{original} (≈ {tx.amount_byn:.2f} BYN)'
+        return original
+
+    amount=tx.amount_byn if tx.amount_byn is not None else tx.amount
+    return f'{sign}{amount:.2f} BYN'
+
+def operations_page_text(scope,start,end,page=0,page_size=15):
+    labels={'family':'🏠 СЕМЬЯ','marketing':'📈 МАРКЕТИНГ','reserve':'🛡 НЗ'}
+    items=_operations_for_scope(scope,start,end)
+    pages=max(1,(len(items)+page_size-1)//page_size)
+    page=max(0,min(page,pages-1))
+    chunk=items[page*page_size:(page+1)*page_size]
+    period_end=(end.date() - __import__('datetime').timedelta(days=1))
+    lines=[
+        f'📋 ОПЕРАЦИИ — {labels[scope]}',
+        f'{start:%d.%m.%Y} — {period_end:%d.%m.%Y}',
+        ''
+    ]
+    if not chunk:
+        lines.append('За этот период операций нет.')
+    else:
+        for tx in chunk:
+            dt=datetime.fromisoformat(tx.occurred_at)
+            lines.append(f'{dt:%d.%m %H:%M} | {_operation_amount(tx,scope)} | {_operation_name(tx,scope)}')
+        lines += ['',f'Операций: {len(items)} · страница {page+1}/{pages}']
+    return '\n'.join(lines),len(items),page,pages
+
+def operations_page_keyboard(scope,start,end,page,pages):
+    s=start.strftime('%Y%m%d'); e=end.strftime('%Y%m%d')
+    nav=[]
+    if page>0:
+        nav.append(b('⬅️',f'oplist:{scope}:{s}:{e}:{page-1}'))
+    if page+1<pages:
+        nav.append(b('➡️',f'oplist:{scope}:{s}:{e}:{page+1}'))
+    rows=[]
+    if nav:
+        rows.append(nav)
+    rows += [
+        [
+            b('🏠 Семья',f'oplist:family:{s}:{e}:0'),
+            b('📈 Маркетинг',f'oplist:marketing:{s}:{e}:0'),
+            b('🛡 НЗ',f'oplist:reserve:{s}:{e}:0')
+        ],
+        [b('📅 Другой период',f'opchooseperiod:{scope}'),b('🔙 Направление','opshome:x')]
+    ]
+    return markup(rows)
+
+async def show_operations_page(chat_id,scope,start,end,page=0):
+    text,_,page,pages=operations_page_text(scope,start,end,page)
+    await send_text(
+        text,
+        chat_id=chat_id,
+        reply_markup=operations_page_keyboard(scope,start,end,page,pages)
+    )
 
 def balances_keyboard():
     return markup([
@@ -277,6 +384,34 @@ async def handle_callback(cb):
         await answer_callback(cid,'Нет доступа'); return
     try:
         p=data.split(':'); action=p[0]
+        if action=='opshome':
+            await send_text('Какое направление показать?',chat_id=chat_id,reply_markup=operations_scope_keyboard())
+            await answer_callback(cid); return
+        if action=='opscope':
+            scope=p[1]
+            await send_text('Выберите период операций:',chat_id=chat_id,reply_markup=operations_periods_keyboard(scope))
+            await answer_callback(cid); return
+        if action=='opchooseperiod':
+            scope=p[1]
+            await send_text('Выберите период операций:',chat_id=chat_id,reply_markup=operations_periods_keyboard(scope))
+            await answer_callback(cid); return
+        if action=='opperiod':
+            scope=p[1]; choice=p[2]
+            if choice=='current': start,end=financial_period()
+            elif choice=='previous': start,end=previous_financial_period()
+            elif choice=='month': start,end=current_calendar_month()
+            elif choice=='prevmonth': start,end=previous_calendar_month()
+            elif choice=='30': start,end=last_days(30)
+            else:
+                set_user_state(uid,'operations_custom_period',{'scope':scope})
+                await send_text('Ответьте двумя датами:\n2026-07-15 2026-08-14',chat_id=chat_id,reply_markup=force_reply())
+                await answer_callback(cid); return
+            await show_operations_page(chat_id,scope,start,end,0)
+            await answer_callback(cid); return
+        if action=='oplist':
+            scope=p[1]; start,end=decode_dates(p[2],p[3]); page=int(p[4])
+            await show_operations_page(chat_id,scope,start,end,page)
+            await answer_callback(cid); return
         if action=='showperiod':
             await send_text('Выберите период:',chat_id=chat_id,reply_markup=periods_keyboard())
             await answer_callback(cid); return
@@ -393,6 +528,14 @@ async def handle_state_reply(msg,uid,state):
         if not custom:
             await send_text('Не понял. Ответьте так:\n2026-07-15 2026-08-14',chat_id=chat_id,reply_markup=force_reply()); return True
         clear_user_state(uid); await show_period(chat_id,*custom); return True
+    if state['state']=='operations_custom_period':
+        custom=parse_custom_period(text.split())
+        if not custom:
+            await send_text('Не понял. Ответьте так:\n2026-07-15 2026-08-14',chat_id=chat_id,reply_markup=force_reply()); return True
+        scope=state['payload']['scope']
+        clear_user_state(uid)
+        await show_operations_page(chat_id,scope,*custom,0)
+        return True
     if state['state']=='opening_balance':
         try:
             amount=Decimal(text.replace(',','.'))
@@ -421,12 +564,29 @@ async def handle_state_reply(msg,uid,state):
         elif flow=='marketing_income':
             tx=update_transaction(tx.id,scope='marketing',operation_type='income',direction='in',source=desc)
             mid=await send_text(header(tx)+'\n\n📈 Доход маркетинга\nВыберите тип:',chat_id=chat_id,reply_markup=category_keyboard(tx,'marketing'))
-        elif flow=='reserve_in':
-            tx=update_transaction(tx.id,scope='marketing',category_code='reserve_contribution',operation_type='allocation',direction='out',status='categorized')
+        elif flow=='reserve_from_marketing':
+            tx=update_transaction(
+                tx.id,scope='marketing',category_code='reserve_contribution',
+                operation_type='allocation',direction='out',status='categorized',
+                source='Маркетинг'
+            )
+            mid=await send_text(finalized_text(tx),chat_id=chat_id,reply_markup=finalized_keyboard(tx))
+        elif flow=='reserve_from_family':
+            tx=update_transaction(
+                tx.id,scope='family',category_code='reserve_from_family',
+                operation_type='allocation',direction='out',status='categorized',
+                source='Семья'
+            )
+            mid=await send_text(finalized_text(tx),chat_id=chat_id,reply_markup=finalized_keyboard(tx))
+        elif flow=='reserve_out':
+            tx=update_transaction(
+                tx.id,scope='family',category_code='reserve_to_family',
+                operation_type='transfer',direction='in',status='categorized',source='НЗ'
+            )
             mid=await send_text(finalized_text(tx),chat_id=chat_id,reply_markup=finalized_keyboard(tx))
         else:
-            tx=update_transaction(tx.id,scope='family',category_code='reserve_to_family',operation_type='transfer',direction='in',status='categorized',source='НЗ')
-            mid=await send_text(finalized_text(tx),chat_id=chat_id,reply_markup=finalized_keyboard(tx))
+            await send_text('Неизвестный тип операции.',chat_id=chat_id)
+            return True
         set_telegram_message(tx.id,chat_id,mid)
         return True
     return False
@@ -472,6 +632,8 @@ async def handle_message(msg):
         await send_text('Что добавляем?',chat_id=chat_id,reply_markup=manual_flow_keyboard()); return
     if text=='📊 Статистика':
         await send_text('Выберите период:',chat_id=chat_id,reply_markup=periods_keyboard()); return
+    if text=='📋 Операции':
+        await send_text('Какое направление показать?',chat_id=chat_id,reply_markup=operations_scope_keyboard()); return
     if text=='💰 Балансы':
         await send_text(await balances_text(),chat_id=chat_id,reply_markup=balances_keyboard()); return
     if text=='⏳ Разобрать': text='/pending'
@@ -483,9 +645,11 @@ async def handle_message(msg):
     if command in {'/start','/menu'}:
         await show_main(chat_id); return
     if command=='/help':
-        await send_text('Основные действия теперь доступны кнопками.\n\nСтартовый НЗ задавайте через «💰 Балансы».\n«🛡 Перевести в НЗ» используйте только для нового реального перевода маркетинговых денег в резерв.',chat_id=chat_id,reply_markup=main_keyboard()); return
+        await send_text('Основные действия теперь доступны кнопками.\n\n«📋 Операции» показывает журнал по семье, маркетингу или НЗ за выбранный период.\n\nСтартовый НЗ задавайте через «💰 Балансы».\nДля пополнения НЗ выбирайте отдельно «🏠 Семья → НЗ» или «📈 Маркетинг → НЗ». Это перемещение между контурами, а не расход.',chat_id=chat_id,reply_markup=main_keyboard()); return
     if command=='/balances':
         await send_text(await balances_text(),chat_id=chat_id,reply_markup=balances_keyboard()); return
+    if command in {'/operations','/ops'}:
+        await send_text('Какое направление показать?',chat_id=chat_id,reply_markup=operations_scope_keyboard()); return
     if command=='/stats':
         if argline:
             custom=parse_custom_period(argline.split())

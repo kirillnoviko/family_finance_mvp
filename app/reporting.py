@@ -59,103 +59,188 @@ def parse_custom_period(args):
 def label(s,e):
     return f'{s:%d.%m.%Y} — {(e-timedelta(days=1)):%d.%m.%Y}'
 
-def family_report(s,e):
-    tx=query_transactions(s.isoformat(),e.isoformat())
-    missing_fx=[t for t in tx if t.scope=='family' and t.currency!='BYN' and t.amount_byn_minor is None]
-    incomes=[t for t in tx if t.scope=='family' and t.operation_type=='income']
-    reserve_in=[t for t in tx if t.category_code=='reserve_to_family']
-    expenses=[t for t in tx if t.scope=='family' and t.operation_type=='expense']
-    earned=sum(t.report_amount_minor for t in incomes)
-    rz=sum(t.report_amount_minor for t in reserve_in)
-    avail=earned+rz
-    spent=sum(t.report_amount_minor for t in expenses)
-    byinc=defaultdict(int)
-    for t in incomes:
-        byinc[t.category_code or 'family_other_income']+=t.report_amount_minor
-    if rz:
-        byinc['reserve_to_family']+=rz
-    byexp=defaultdict(int)
-    for t in expenses:
-        c=BY_CODE.get(t.category_code or 'family_other_expense')
-        root=c.parent if c and c.parent else (t.category_code or 'family_other_expense')
-        byexp[root]+=t.report_amount_minor
-    lines=['🏠 СЕМЬЯ',label(s,e),'',
-           f'💰 Заработано семьёй: {money(earned)}',
-           f'🛡 Добавлено из НЗ: {money(rz)}',
-           f'💵 Всего доступно: {money(avail)}',
-           f'💸 Потрачено: {money(spent)}',
-           f'📌 Остаток периода: {money(avail-spent)}']
-    if avail>0:
-        lines.append(f'📉 Расходы / доступные деньги: {pct(spent,avail)}')
-    if byinc:
-        lines+=['','💰 Откуда пришли деньги:']+[f'• {title(c)} — {money(a)} ({pct(a,avail)})' for c,a in sorted(byinc.items(),key=lambda x:x[1],reverse=True)]
-    if byexp:
-        lines+=['','💸 Расходы:']+[f'• {title(c)} — {money(a)} ({pct(a,spent)})' for c,a in sorted(byexp.items(),key=lambda x:x[1],reverse=True)]
-    if missing_fx:
-        lines+=['',f'⚠️ Для {len(missing_fx)} валютных операций пока не удалось получить исторический курс НБРБ; они временно не входят в BYN-итоги.']
-    return '\n'.join(lines)
-
-def marketing_report(s,e):
-    tx=query_transactions(s.isoformat(),e.isoformat())
-    missing_fx=[t for t in tx if t.scope=='marketing' and t.currency!='BYN' and t.amount_byn_minor is None]
-    incomes=[t for t in tx if t.scope=='marketing' and t.operation_type=='income']
-    income=sum(t.report_amount_minor for t in incomes)
-    salary=sum(t.report_amount_minor for t in tx if t.category_code=='assistant_salary')
-    tax=sum(t.report_amount_minor for t in tx if t.category_code=='tax')
-    business=sum(t.report_amount_minor for t in tx if t.category_code=='business_expense')
-    reserve=sum(t.report_amount_minor for t in tx if t.category_code=='reserve_contribution')
-    bysrc=defaultdict(int)
-    for t in incomes:
-        bysrc[(t.source or t.merchant or t.description or 'Прочее').strip()]+=t.report_amount_minor
-    lines=['📈 МАРКЕТИНГ',label(s,e),'',f'💰 Получено: {money(income)}']
-    if bysrc:
-        lines+=['','Откуда пришли деньги:']+[f'• {src} — {money(a)} ({pct(a,income)})' for src,a in sorted(bysrc.items(),key=lambda x:x[1],reverse=True)]
-    lines+=['','Распределение:',
-            f'• 👩‍💻 Зарплаты — {money(salary)} ({pct(salary,income)})',
-            f'• 🏛 Налог — {money(tax)} ({pct(tax,income)})',
-            f'• 📦 Расходы бизнеса — {money(business)} ({pct(business,income)})',
-            f'• 🛡 В НЗ — {money(reserve)} ({pct(reserve,income)})',
-            f'• 💵 Нераспределено за период — {money(income-salary-tax-business-reserve)}']
-    if missing_fx:
-        lines+=['',f'⚠️ Для {len(missing_fx)} валютных операций пока не удалось получить исторический курс НБРБ; они временно не входят в BYN-итоги.']
-    return '\n'.join(lines)
-
-def reserve_report(s,e):
-    period=query_transactions(s.isoformat(),e.isoformat())
-    pin=sum(t.report_amount_minor for t in period if t.category_code=='reserve_contribution')
-    pout=sum(t.report_amount_minor for t in period if t.category_code=='reserve_to_family')
-    initial=get_opening_balances()['reserve']
-    def movements(items):
-        return sum(t.report_amount_minor if t.category_code=='reserve_contribution' else -t.report_amount_minor for t in items)
-    opening=initial+movements(all_reserve_transactions(s.isoformat()))
-    closing=initial+movements(all_reserve_transactions(e.isoformat()))
-    return '\n'.join(['🛡 НЕПРИКОСНОВЕННЫЙ ЗАПАС',label(s,e),'',
-                      f'На начало: {money(opening)}',
-                      f'+ Пополнено: {money(pin)}',
-                      f'- Передано семье: {money(pout)}',
-                      f'На конец: {money(closing)}'])
-
-def current_balances():
+def balances_at(end_iso=None):
     opening=get_opening_balances()
     family=opening['family']
     marketing=opening['marketing']
     reserve=opening['reserve']
-    for t in query_all_transactions():
+
+    for t in query_all_transactions(end_iso):
         amount=t.report_amount_minor
         if amount==0 and t.currency!='BYN' and t.amount_byn_minor is None:
             continue
+
+        # Transfers/allocation involving the reserve are balance movements,
+        # not income/expense.
         if t.category_code=='reserve_contribution':
             marketing-=amount
+            reserve+=amount
+            continue
+        if t.category_code=='reserve_from_family':
+            family-=amount
             reserve+=amount
             continue
         if t.category_code=='reserve_to_family':
             reserve-=amount
             family+=amount
             continue
+
         if t.scope=='family':
-            if t.operation_type=='income': family+=amount
-            elif t.operation_type=='expense': family-=amount
+            if t.operation_type=='income':
+                family+=amount
+            elif t.operation_type=='expense':
+                family-=amount
         elif t.scope=='marketing':
-            if t.operation_type=='income': marketing+=amount
-            elif t.operation_type=='expense': marketing-=amount
+            if t.operation_type=='income':
+                marketing+=amount
+            elif t.operation_type=='expense':
+                marketing-=amount
+
     return {'family':family,'marketing':marketing,'reserve':reserve}
+
+
+def family_report(s,e):
+    tx=query_transactions(s.isoformat(),e.isoformat())
+    missing_fx=[t for t in tx if t.scope=='family' and t.currency!='BYN' and t.amount_byn_minor is None]
+
+    opening=balances_at(s.isoformat())['family']
+    closing=balances_at(e.isoformat())['family']
+
+    incomes=[t for t in tx if t.scope=='family' and t.operation_type=='income']
+    expenses=[t for t in tx if t.scope=='family' and t.operation_type=='expense']
+    reserve_in=[t for t in tx if t.category_code=='reserve_to_family']
+    reserve_out=[t for t in tx if t.category_code=='reserve_from_family']
+
+    earned=sum(t.report_amount_minor for t in incomes)
+    rz_in=sum(t.report_amount_minor for t in reserve_in)
+    rz_out=sum(t.report_amount_minor for t in reserve_out)
+    spent=sum(t.report_amount_minor for t in expenses)
+    change=closing-opening
+
+    byinc=defaultdict(int)
+    for t in incomes:
+        byinc[t.category_code or 'family_other_income']+=t.report_amount_minor
+    if rz_in:
+        byinc['reserve_to_family']+=rz_in
+
+    byexp=defaultdict(int)
+    for t in expenses:
+        c=BY_CODE.get(t.category_code or 'family_other_expense')
+        root=c.parent if c and c.parent else (t.category_code or 'family_other_expense')
+        byexp[root]+=t.report_amount_minor
+
+    inflow=earned+rz_in
+    usable=opening+inflow
+
+    lines=[
+        '🏠 СЕМЬЯ',label(s,e),'',
+        f'💵 Баланс на начало: {money(opening)}',
+        f'➕ Доходы семьи: {money(earned)}',
+        f'🛡 Из НЗ в семью: {money(rz_in)}',
+        f'💸 Расходы: {money(spent)}',
+        f'🛡 В НЗ из семьи: {money(rz_out)}',
+        f'📈 Изменение за период: {money(change)}',
+        f'💰 Баланс на конец: {money(closing)}',
+    ]
+
+    if usable>0:
+        lines.append(f'📉 Расходы / доступные деньги: {pct(spent,usable)}')
+
+    if byinc:
+        denom=inflow if inflow else 1
+        lines+=['','💰 Откуда пришли деньги:']+[
+            f'• {title(c)} — {money(a)} ({pct(a,denom)})'
+            for c,a in sorted(byinc.items(),key=lambda x:x[1],reverse=True)
+        ]
+
+    if byexp:
+        lines+=['','💸 Расходы:']+[
+            f'• {title(c)} — {money(a)} ({pct(a,spent)})'
+            for c,a in sorted(byexp.items(),key=lambda x:x[1],reverse=True)
+        ]
+
+    if missing_fx:
+        lines+=['',f'⚠️ Для {len(missing_fx)} валютных операций пока не удалось получить исторический курс НБРБ; они временно не входят в BYN-итоги.']
+    return '\n'.join(lines)
+
+
+def marketing_report(s,e):
+    tx=query_transactions(s.isoformat(),e.isoformat())
+    missing_fx=[t for t in tx if t.scope=='marketing' and t.currency!='BYN' and t.amount_byn_minor is None]
+
+    opening=balances_at(s.isoformat())['marketing']
+    closing=balances_at(e.isoformat())['marketing']
+
+    incomes=[t for t in tx if t.scope=='marketing' and t.operation_type=='income']
+    income=sum(t.report_amount_minor for t in incomes)
+    salary=sum(t.report_amount_minor for t in tx if t.category_code=='assistant_salary')
+    tax=sum(t.report_amount_minor for t in tx if t.category_code=='tax')
+    business=sum(t.report_amount_minor for t in tx if t.category_code=='business_expense')
+    reserve=sum(t.report_amount_minor for t in tx if t.category_code=='reserve_contribution')
+    expenses=salary+tax+business
+    change=closing-opening
+
+    bysrc=defaultdict(int)
+    for t in incomes:
+        bysrc[(t.source or t.merchant or t.description or 'Прочее').strip()]+=t.report_amount_minor
+
+    lines=[
+        '📈 МАРКЕТИНГ',label(s,e),'',
+        f'💵 Баланс на начало: {money(opening)}',
+        f'➕ Получено: {money(income)}',
+        f'💸 Расходы бизнеса: {money(expenses)}',
+        f'🛡 В НЗ из маркетинга: {money(reserve)}',
+        f'📈 Изменение за период: {money(change)}',
+        f'💰 Баланс на конец: {money(closing)}',
+    ]
+
+    if bysrc:
+        lines+=['','Откуда пришли деньги:']+[
+            f'• {src} — {money(a)} ({pct(a,income)})'
+            for src,a in sorted(bysrc.items(),key=lambda x:x[1],reverse=True)
+        ]
+
+    lines+=['','Расходы / распределение:',
+            f'• 👩‍💻 Зарплаты — {money(salary)} ({pct(salary,income)})',
+            f'• 🏛 Налог — {money(tax)} ({pct(tax,income)})',
+            f'• 📦 Прочие расходы бизнеса — {money(business)} ({pct(business,income)})',
+            f'• 🛡 В НЗ — {money(reserve)} ({pct(reserve,income)})']
+
+    if missing_fx:
+        lines+=['',f'⚠️ Для {len(missing_fx)} валютных операций пока не удалось получить исторический курс НБРБ; они временно не входят в BYN-итоги.']
+    return '\n'.join(lines)
+
+
+def reserve_report(s,e):
+    period=query_transactions(s.isoformat(),e.isoformat())
+
+    from_marketing=sum(
+        t.report_amount_minor for t in period
+        if t.category_code=='reserve_contribution'
+    )
+    from_family=sum(
+        t.report_amount_minor for t in period
+        if t.category_code=='reserve_from_family'
+    )
+    to_family=sum(
+        t.report_amount_minor for t in period
+        if t.category_code=='reserve_to_family'
+    )
+
+    opening=balances_at(s.isoformat())['reserve']
+    closing=balances_at(e.isoformat())['reserve']
+    change=closing-opening
+
+    return '\n'.join([
+        '🛡 НЕПРИКОСНОВЕННЫЙ ЗАПАС',label(s,e),'',
+        f'💵 Баланс на начало: {money(opening)}',
+        f'📈 Из маркетинга в НЗ: {money(from_marketing)}',
+        f'🏠 Из семьи в НЗ: {money(from_family)}',
+        f'➖ Из НЗ в семью: {money(to_family)}',
+        f'📈 Изменение за период: {money(change)}',
+        f'💰 Баланс на конец: {money(closing)}',
+    ])
+
+
+def current_balances():
+    return balances_at()
