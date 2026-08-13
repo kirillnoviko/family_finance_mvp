@@ -2,10 +2,8 @@ import os,sqlite3
 from pathlib import Path
 from datetime import datetime
 from decimal import Decimal
-DB='/tmp/ff-parser.db'
-try: Path(DB).unlink()
-except FileNotFoundError: pass
-os.environ['TELEGRAM_BOT_TOKEN']='x';os.environ['TELEGRAM_CHAT_ID']='-100';os.environ['API_SECRET']='x';os.environ['DATABASE_PATH']=DB;os.environ['PERIOD_START_DAY']='15'
+DB=os.environ.get('DATABASE_PATH','/tmp/family-finance-pytest.db')
+os.environ['TELEGRAM_BOT_TOKEN']='x';os.environ['TELEGRAM_CHAT_ID']='-100';os.environ['API_SECRET']='x';os.environ.setdefault('DATABASE_PATH',DB);os.environ['PERIOD_START_DAY']='15'
 from app.db import create_manual_transaction,init_db,update_transaction
 from app.reporting import family_report,marketing_report,reserve_report
 

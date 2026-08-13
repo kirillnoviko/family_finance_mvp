@@ -1,0 +1,16 @@
+Family Finance Bot v1.2 validation
+
+- Python compileall: PASS
+- pytest: 12 passed
+- Real Priorbank examples checked manually:
+  - Oplata BYN: PASS
+  - Oplata USD / IRL APPLE.COM/BILL: PASS
+  - Zachislenie perevoda BYN: PASS
+  - Zachislenie perevoda USD: PASS
+  - Perevod BYN: PASS
+  - Nalichnye v bankomate BYN: PASS -> cash_withdrawal pending choice
+  - Na vashu kartu zachisleno: PASS
+  - Priorbank OTP Code: PASS -> ignored, no transaction
+- Cash withdrawal Telegram keyboard: tested in unit suite
+- Existing pending duplicate retry path: code-reviewed and compile-tested
+- Paste-old-SMS Telegram import path: code-reviewed and compile-tested

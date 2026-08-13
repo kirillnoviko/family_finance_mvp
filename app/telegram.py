@@ -6,11 +6,12 @@ import httpx
 from app.categories import BY_CODE,children,roots,title
 from app.config import settings
 from app.db import (
-    clear_user_state,create_manual_transaction,find_rule,get_transaction,get_user_state,
+    clear_user_state,create_manual_transaction,create_sms_transaction,find_rule,get_transaction,get_user_state,
     list_pending,reset_transaction,save_rule,set_opening_balance,set_telegram_message,
     set_user_state,update_transaction
 )
-from app.exchange import convert_byn,get_byn_rates
+from app.exchange import convert_byn,convert_foreign_to_byn,get_byn_rates
+from app.parser import IgnoredSms,parse_priorbank_sms
 from app.reporting import (
     current_balances,current_calendar_month,family_report,financial_period,last_days,
     marketing_report,parse_custom_period,previous_calendar_month,
@@ -89,10 +90,43 @@ def amount_text(tx,signed=False):
 def header(tx):
     emoji='💰' if tx.direction=='in' else '💸'
     details=tx.merchant or tx.description or 'Операция'
-    lines=[f'{emoji} {amount_text(tx,True)}',details,'',f"📅 {tx.occurred_at.replace('T',' ')}",f'💳 {tx.physical_account}']
-    if tx.balance_after is not None: lines.append(f'Баланс после: {tx.balance_after:.2f} {tx.currency}')
+    lines=[f'{emoji} {amount_text(tx,True)}']
+    if tx.currency!='BYN' and tx.amount_byn is not None:
+        lines.append(f'≈ {tx.amount_byn:.2f} BYN по курсу НБРБ на {tx.fx_rate_date or tx.occurred_at[:10]}')
+    elif tx.currency!='BYN':
+        lines.append('⚠️ BYN-эквивалент пока не рассчитан')
+    lines += [details,'',f"📅 {tx.occurred_at.replace('T',' ')}",f'💳 {tx.physical_account}']
+    if tx.balance_after is not None:
+        lines.append(f"Баланс после: {tx.balance_after:.2f} {'BYN' if tx.origin=='sms' else tx.currency}")
     return '\n'.join(lines)
 
+async def create_bank_transaction(device,parsed):
+    amount_byn=None
+    fx_rate=None
+    fx_date=parsed.occurred_at.date()
+    if parsed.currency=='BYN':
+        amount_byn=parsed.amount
+        fx_rate=Decimal('1')
+    else:
+        try:
+            amount_byn,fx_rate=await convert_foreign_to_byn(
+                parsed.amount,
+                parsed.currency,
+                fx_date,
+            )
+        except Exception:
+            logger.exception(
+                'Could not get NBRB rate for %s on %s',
+                parsed.currency,
+                fx_date,
+            )
+    return create_sms_transaction(
+        device,
+        parsed,
+        amount_byn=amount_byn,
+        fx_rate=fx_rate,
+        fx_rate_date=fx_date if amount_byn is not None else None,
+    )
 def category_keyboard(tx,scope):
     if tx.direction=='in':
         cats=[BY_CODE['salary_kirill'],BY_CODE['salary_wife'],BY_CODE['family_other_income'],BY_CODE['reserve_to_family']] if scope=='family' else [BY_CODE['marketing_client_income'],BY_CODE['marketing_other_income']]
@@ -113,6 +147,12 @@ def subcategory_keyboard(tx,parent):
     return markup(rows)
 
 def initial_keyboard(tx):
+    if tx.operation_type=='cash_withdrawal':
+        return markup([
+            [b('🏠 Расход семьи',f'cash:{tx.id}:family_expense'),b('📈 Расход маркетинга',f'cash:{tx.id}:marketing_expense')],
+            [b('👩‍💻 Зарплата помощнице',f'cash:{tx.id}:assistant_salary'),b('💵 Оставил наличными',f'cash:{tx.id}:keep_cash')],
+            [b('🔄 Свои деньги',f'special:{tx.id}:own_transfer'),b('🚫 Игнорировать',f'special:{tx.id}:ignore')]
+        ])
     if tx.direction=='in':
         return markup([[b('🏠 Семья',f'scope:{tx.id}:family'),b('📈 Маркетинг',f'scope:{tx.id}:marketing')],
                        [b('🔄 Свои деньги',f'special:{tx.id}:own_transfer'),b('🚫 Игнорировать',f'special:{tx.id}:ignore')]])
@@ -123,7 +163,7 @@ def initial_keyboard(tx):
 def finalized_text(tx):
     scope='🏠 Семья' if tx.scope=='family' else '📈 Маркетинг' if tx.scope=='marketing' else '🔄 Внутренний'
     lines=['✅ Операция учтена','',header(tx),'',f'Контур: {scope}',f'Категория: {title(tx.category_code)}']
-    if tx.source and not tx.source.startswith('telegram:'): lines.append(f'Источник: {tx.source}')
+    if tx.source and not tx.source.startswith(('telegram:','system:')): lines.append(f'Источник: {tx.source}')
     return '\n'.join(lines)
 
 def finalized_keyboard(tx):
@@ -199,7 +239,8 @@ async def send_transaction_for_classification(tx):
         mid=await send_text(finalized_text(tx)+'\n\n🧠 Категория применена по правилу.',reply_markup=finalized_keyboard(tx))
         set_telegram_message(tx.id,settings.telegram_chat_id,mid)
         return
-    mid=await send_text(header(tx)+'\n\nК чему относится операция?',reply_markup=initial_keyboard(tx))
+    prompt='Что сделали со снятыми наличными?' if tx.operation_type=='cash_withdrawal' else 'К чему относится операция?'
+    mid=await send_text(header(tx)+'\n\n'+prompt,reply_markup=initial_keyboard(tx))
     set_telegram_message(tx.id,settings.telegram_chat_id,mid)
 
 async def edit_tx(tx,text,keyb,msg=None):
@@ -270,6 +311,24 @@ async def handle_callback(cb):
             await answer_callback(cid); return
 
         tx_id=int(p[1]) if len(p)>1 and p[1].isdigit() else None
+        if action=='cash':
+            tx=get_transaction(tx_id)
+            if not tx:
+                await answer_callback(cid,'Операция не найдена'); return
+            choice=p[2]
+            if choice=='family_expense':
+                tx=update_transaction(tx.id,scope='family',operation_type='expense',direction='out')
+                await edit_tx(tx,header(tx)+'\n\n🏠 Расход семьи из снятых наличных\nВыберите категорию:',category_keyboard(tx,'family'),msg)
+            elif choice=='marketing_expense':
+                tx=update_transaction(tx.id,scope='marketing',operation_type='expense',direction='out')
+                await edit_tx(tx,header(tx)+'\n\n📈 Расход маркетинга из снятых наличных\nВыберите категорию:',category_keyboard(tx,'marketing'),msg)
+            elif choice=='assistant_salary':
+                tx=update_transaction(tx.id,scope='marketing',operation_type='expense',direction='out')
+                await finalize(tx,'assistant_salary',msg)
+            elif choice=='keep_cash':
+                tx=update_transaction(tx.id,scope='internal',category_code='own_transfer',operation_type='transfer',status='categorized')
+                await edit_tx(tx,finalized_text(tx)+'\n\n💵 Снятие отмечено как перемещение денег в наличные. Сам расход добавьте позже, когда эти наличные будут потрачены.',finalized_keyboard(tx),msg)
+            await answer_callback(cid,'Готово'); return
         if action=='scope':
             scope=p[2]; tx=update_transaction(tx_id,scope=scope)
             await edit_tx(tx,header(tx)+f"\n\nКонтур: {'🏠 Семья' if scope=='family' else '📈 Маркетинг'}\nВыберите категорию:",category_keyboard(tx,scope),msg)
@@ -379,6 +438,32 @@ async def handle_message(msg):
     uid=msg.get('from',{}).get('id')
     if not allowed(uid): return
     text=(msg.get('text') or '').strip(); chat_id=msg['chat']['id']
+
+    # Recovery/import path: paste an old Priorbank SMS directly into the group.
+    # Use the same device key as the iPhone automation so deduplication remains
+    # consistent if the same SMS later arrives from Shortcuts.
+    looks_like_bank = text.lower().startswith('karta ') or (
+        len(text) >= 16 and text[:2].isdigit() and '/' in text[:6] and 'na vashu kartu' in text.lower()
+    ) or text.lower().startswith('priorbank ')
+    if looks_like_bank:
+        try:
+            parsed=parse_priorbank_sms(text)
+        except IgnoredSms:
+            await send_text('ℹ️ Это служебное сообщение Priorbank, финансовой операции в нём нет.',chat_id=chat_id)
+            return
+        except ValueError:
+            await send_text('⚠️ Не смог разобрать это сообщение Priorbank. Пришлите его целиком, без редактирования.',chat_id=chat_id)
+            return
+        tx,created=await create_bank_transaction('wife',parsed)
+        if not created and tx.status!='pending':
+            await send_text('ℹ️ Эта операция уже есть в базе и уже обработана.',chat_id=chat_id)
+            return
+        if not created and tx.telegram_message_id:
+            await send_text('ℹ️ Эта операция уже есть в очереди «Разобрать».',chat_id=chat_id)
+            return
+        await send_transaction_for_classification(tx)
+        return
+
     state=get_user_state(uid)
     if state and not text.startswith('/'):
         if await handle_state_reply(msg,uid,state): return
@@ -416,7 +501,8 @@ async def handle_message(msg):
             await send_text('✅ Неразобранных операций нет.',chat_id=chat_id,reply_markup=main_keyboard()); return
         await send_text(f'⏳ Неразобранных операций: {len(items)}',chat_id=chat_id)
         for tx in items[:10]:
-            mid=await send_text(header(tx)+'\n\nК чему относится операция?',chat_id=chat_id,reply_markup=initial_keyboard(tx))
+            prompt='Что сделали со снятыми наличными?' if tx.operation_type=='cash_withdrawal' else 'К чему относится операция?'
+            mid=await send_text(header(tx)+'\n\n'+prompt,chat_id=chat_id,reply_markup=initial_keyboard(tx))
             set_telegram_message(tx.id,chat_id,mid)
         return
     if command=='/add':

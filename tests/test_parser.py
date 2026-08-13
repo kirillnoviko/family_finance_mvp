@@ -1,5 +1,5 @@
 import os
-os.environ.setdefault('TELEGRAM_BOT_TOKEN','x');os.environ.setdefault('TELEGRAM_CHAT_ID','-100');os.environ.setdefault('API_SECRET','x');os.environ.setdefault('DATABASE_PATH','/tmp/ff-parser.db')
+os.environ.setdefault('TELEGRAM_BOT_TOKEN','x');os.environ.setdefault('TELEGRAM_CHAT_ID','-100');os.environ.setdefault('API_SECRET','x');os.environ.setdefault('DATABASE_PATH','/tmp/family-finance-pytest.db')
 from app.parser import parse_priorbank_sms
 SAMPLES=[
 ('Karta 4***3730 11-08-26 10:34:07. Zachislenie perevoda 442.99 BYN. BLR KIRYL NOVIKAU. Balance: 605.96 BYN Tel. 7299090','in','income','442.99','KIRYL NOVIKAU'),

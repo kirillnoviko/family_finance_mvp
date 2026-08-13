@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-os.environ.setdefault('TELEGRAM_BOT_TOKEN','x');os.environ.setdefault('TELEGRAM_CHAT_ID','-100');os.environ.setdefault('API_SECRET','x');os.environ.setdefault('DATABASE_PATH','/tmp/ff-parser.db')
+os.environ.setdefault('TELEGRAM_BOT_TOKEN','x');os.environ.setdefault('TELEGRAM_CHAT_ID','-100');os.environ.setdefault('API_SECRET','x');os.environ.setdefault('DATABASE_PATH','/tmp/family-finance-pytest.db')
 from app.db import create_sms_transaction,init_db
 from app.parser import parse_priorbank_sms
 

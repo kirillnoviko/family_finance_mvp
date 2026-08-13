@@ -5,7 +5,7 @@ from decimal import Decimal
 os.environ.setdefault('TELEGRAM_BOT_TOKEN','x')
 os.environ.setdefault('TELEGRAM_CHAT_ID','-100')
 os.environ.setdefault('API_SECRET','x')
-os.environ.setdefault('DATABASE_PATH','/tmp/ff-parser.db')
+os.environ.setdefault('DATABASE_PATH','/tmp/family-finance-pytest.db')
 os.environ.setdefault('PERIOD_START_DAY','15')
 
 from app.db import init_db,set_opening_balance,get_opening_balances

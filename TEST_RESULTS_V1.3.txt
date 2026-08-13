@@ -1,0 +1,8 @@
+Family Finance Bot v1.3 validation
+
+- Python compileall: PASS
+- pytest: 15 passed
+- SQLite v1.2 -> v1.3 schema migration: PASS
+  - existing rows preserved
+  - BYN rows backfilled locally
+  - foreign rows preserved for historical-rate backfill on app startup

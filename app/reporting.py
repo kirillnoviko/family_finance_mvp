@@ -61,23 +61,24 @@ def label(s,e):
 
 def family_report(s,e):
     tx=query_transactions(s.isoformat(),e.isoformat())
+    missing_fx=[t for t in tx if t.scope=='family' and t.currency!='BYN' and t.amount_byn_minor is None]
     incomes=[t for t in tx if t.scope=='family' and t.operation_type=='income']
     reserve_in=[t for t in tx if t.category_code=='reserve_to_family']
     expenses=[t for t in tx if t.scope=='family' and t.operation_type=='expense']
-    earned=sum(t.amount_minor for t in incomes)
-    rz=sum(t.amount_minor for t in reserve_in)
+    earned=sum(t.report_amount_minor for t in incomes)
+    rz=sum(t.report_amount_minor for t in reserve_in)
     avail=earned+rz
-    spent=sum(t.amount_minor for t in expenses)
+    spent=sum(t.report_amount_minor for t in expenses)
     byinc=defaultdict(int)
     for t in incomes:
-        byinc[t.category_code or 'family_other_income']+=t.amount_minor
+        byinc[t.category_code or 'family_other_income']+=t.report_amount_minor
     if rz:
         byinc['reserve_to_family']+=rz
     byexp=defaultdict(int)
     for t in expenses:
         c=BY_CODE.get(t.category_code or 'family_other_expense')
         root=c.parent if c and c.parent else (t.category_code or 'family_other_expense')
-        byexp[root]+=t.amount_minor
+        byexp[root]+=t.report_amount_minor
     lines=['🏠 СЕМЬЯ',label(s,e),'',
            f'💰 Заработано семьёй: {money(earned)}',
            f'🛡 Добавлено из НЗ: {money(rz)}',
@@ -90,19 +91,22 @@ def family_report(s,e):
         lines+=['','💰 Откуда пришли деньги:']+[f'• {title(c)} — {money(a)} ({pct(a,avail)})' for c,a in sorted(byinc.items(),key=lambda x:x[1],reverse=True)]
     if byexp:
         lines+=['','💸 Расходы:']+[f'• {title(c)} — {money(a)} ({pct(a,spent)})' for c,a in sorted(byexp.items(),key=lambda x:x[1],reverse=True)]
+    if missing_fx:
+        lines+=['',f'⚠️ Для {len(missing_fx)} валютных операций пока не удалось получить исторический курс НБРБ; они временно не входят в BYN-итоги.']
     return '\n'.join(lines)
 
 def marketing_report(s,e):
     tx=query_transactions(s.isoformat(),e.isoformat())
+    missing_fx=[t for t in tx if t.scope=='marketing' and t.currency!='BYN' and t.amount_byn_minor is None]
     incomes=[t for t in tx if t.scope=='marketing' and t.operation_type=='income']
-    income=sum(t.amount_minor for t in incomes)
-    salary=sum(t.amount_minor for t in tx if t.category_code=='assistant_salary')
-    tax=sum(t.amount_minor for t in tx if t.category_code=='tax')
-    business=sum(t.amount_minor for t in tx if t.category_code=='business_expense')
-    reserve=sum(t.amount_minor for t in tx if t.category_code=='reserve_contribution')
+    income=sum(t.report_amount_minor for t in incomes)
+    salary=sum(t.report_amount_minor for t in tx if t.category_code=='assistant_salary')
+    tax=sum(t.report_amount_minor for t in tx if t.category_code=='tax')
+    business=sum(t.report_amount_minor for t in tx if t.category_code=='business_expense')
+    reserve=sum(t.report_amount_minor for t in tx if t.category_code=='reserve_contribution')
     bysrc=defaultdict(int)
     for t in incomes:
-        bysrc[(t.source or t.merchant or t.description or 'Прочее').strip()]+=t.amount_minor
+        bysrc[(t.source or t.merchant or t.description or 'Прочее').strip()]+=t.report_amount_minor
     lines=['📈 МАРКЕТИНГ',label(s,e),'',f'💰 Получено: {money(income)}']
     if bysrc:
         lines+=['','Откуда пришли деньги:']+[f'• {src} — {money(a)} ({pct(a,income)})' for src,a in sorted(bysrc.items(),key=lambda x:x[1],reverse=True)]
@@ -112,15 +116,17 @@ def marketing_report(s,e):
             f'• 📦 Расходы бизнеса — {money(business)} ({pct(business,income)})',
             f'• 🛡 В НЗ — {money(reserve)} ({pct(reserve,income)})',
             f'• 💵 Нераспределено за период — {money(income-salary-tax-business-reserve)}']
+    if missing_fx:
+        lines+=['',f'⚠️ Для {len(missing_fx)} валютных операций пока не удалось получить исторический курс НБРБ; они временно не входят в BYN-итоги.']
     return '\n'.join(lines)
 
 def reserve_report(s,e):
     period=query_transactions(s.isoformat(),e.isoformat())
-    pin=sum(t.amount_minor for t in period if t.category_code=='reserve_contribution')
-    pout=sum(t.amount_minor for t in period if t.category_code=='reserve_to_family')
+    pin=sum(t.report_amount_minor for t in period if t.category_code=='reserve_contribution')
+    pout=sum(t.report_amount_minor for t in period if t.category_code=='reserve_to_family')
     initial=get_opening_balances()['reserve']
     def movements(items):
-        return sum(t.amount_minor if t.category_code=='reserve_contribution' else -t.amount_minor for t in items)
+        return sum(t.report_amount_minor if t.category_code=='reserve_contribution' else -t.report_amount_minor for t in items)
     opening=initial+movements(all_reserve_transactions(s.isoformat()))
     closing=initial+movements(all_reserve_transactions(e.isoformat()))
     return '\n'.join(['🛡 НЕПРИКОСНОВЕННЫЙ ЗАПАС',label(s,e),'',
@@ -135,18 +141,21 @@ def current_balances():
     marketing=opening['marketing']
     reserve=opening['reserve']
     for t in query_all_transactions():
+        amount=t.report_amount_minor
+        if amount==0 and t.currency!='BYN' and t.amount_byn_minor is None:
+            continue
         if t.category_code=='reserve_contribution':
-            marketing-=t.amount_minor
-            reserve+=t.amount_minor
+            marketing-=amount
+            reserve+=amount
             continue
         if t.category_code=='reserve_to_family':
-            reserve-=t.amount_minor
-            family+=t.amount_minor
+            reserve-=amount
+            family+=amount
             continue
         if t.scope=='family':
-            if t.operation_type=='income': family+=t.amount_minor
-            elif t.operation_type=='expense': family-=t.amount_minor
+            if t.operation_type=='income': family+=amount
+            elif t.operation_type=='expense': family-=amount
         elif t.scope=='marketing':
-            if t.operation_type=='income': marketing+=t.amount_minor
-            elif t.operation_type=='expense': marketing-=t.amount_minor
+            if t.operation_type=='income': marketing+=amount
+            elif t.operation_type=='expense': marketing-=amount
     return {'family':family,'marketing':marketing,'reserve':reserve}

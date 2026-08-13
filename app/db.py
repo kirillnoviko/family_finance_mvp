@@ -52,31 +52,103 @@ def init_db():
           updated_at TEXT NOT NULL
         );
         ''')
+        # Safe in-place migration for v1.3. Existing data is preserved.
+        columns={row['name'] for row in con.execute('PRAGMA table_info(transactions)').fetchall()}
+        if 'amount_byn_minor' not in columns:
+            con.execute('ALTER TABLE transactions ADD COLUMN amount_byn_minor INTEGER NULL')
+        if 'fx_rate' not in columns:
+            con.execute('ALTER TABLE transactions ADD COLUMN fx_rate TEXT NULL')
+        if 'fx_rate_date' not in columns:
+            con.execute('ALTER TABLE transactions ADD COLUMN fx_rate_date TEXT NULL')
+
+        # BYN transactions need no network conversion.
+        con.execute("""UPDATE transactions
+                       SET amount_byn_minor=amount_minor,
+                           fx_rate=COALESCE(fx_rate,'1'),
+                           fx_rate_date=COALESCE(fx_rate_date,substr(occurred_at,1,10))
+                       WHERE currency='BYN' AND amount_byn_minor IS NULL""")
+
         for c in CATEGORIES:
             con.execute('''INSERT INTO categories(code,title,emoji,scope,kind,parent_code) VALUES(?,?,?,?,?,?)
             ON CONFLICT(code) DO UPDATE SET title=excluded.title,emoji=excluded.emoji,scope=excluded.scope,kind=excluded.kind,parent_code=excluded.parent_code''',
             (c.code,c.title,c.emoji,c.scope,c.kind,c.parent))
 
 def tx_from_row(r):
-    return Transaction(id=r['id'],occurred_at=r['occurred_at'],amount_minor=r['amount_minor'],currency=r['currency'],direction=r['direction'],operation_type=r['operation_type'],physical_account=r['physical_account'],scope=r['scope'],category_code=r['category_code'],source=r['source'],merchant=r['merchant'],description=r['description'],balance_after_minor=r['balance_after_minor'],origin=r['origin'],status=r['status'],telegram_chat_id=r['telegram_chat_id'],telegram_message_id=r['telegram_message_id'])
-
+    keys=set(r.keys())
+    return Transaction(
+        id=r['id'],
+        occurred_at=r['occurred_at'],
+        amount_minor=r['amount_minor'],
+        currency=r['currency'],
+        direction=r['direction'],
+        operation_type=r['operation_type'],
+        physical_account=r['physical_account'],
+        scope=r['scope'],
+        category_code=r['category_code'],
+        source=r['source'],
+        merchant=r['merchant'],
+        description=r['description'],
+        balance_after_minor=r['balance_after_minor'],
+        origin=r['origin'],
+        status=r['status'],
+        telegram_chat_id=r['telegram_chat_id'],
+        telegram_message_id=r['telegram_message_id'],
+        amount_byn_minor=r['amount_byn_minor'] if 'amount_byn_minor' in keys else (r['amount_minor'] if r['currency']=='BYN' else None),
+        fx_rate=r['fx_rate'] if 'fx_rate' in keys else ('1' if r['currency']=='BYN' else None),
+        fx_rate_date=r['fx_rate_date'] if 'fx_rate_date' in keys else None,
+    )
 def sms_hash(device,raw): return hashlib.sha256(f"{device}|{' '.join(raw.split())}".encode()).hexdigest()
 
-def create_sms_transaction(device,p):
-    h=sms_hash(device,p.raw_text); raw=p.raw_text if settings.store_raw_sms else None
+def create_sms_transaction(device,p,amount_byn=None,fx_rate=None,fx_rate_date=None):
+    h=sms_hash(device,p.raw_text)
+    raw=p.raw_text if settings.store_raw_sms else None
+    amount_byn_minor=to_minor(amount_byn) if amount_byn is not None else (to_minor(p.amount) if p.currency=='BYN' else None)
+    fx_rate_value=str(fx_rate) if fx_rate is not None else ('1' if p.currency=='BYN' else None)
+    fx_date_value=fx_rate_date.isoformat() if hasattr(fx_rate_date,'isoformat') else fx_rate_date
+    if fx_date_value is None and p.currency=='BYN':
+        fx_date_value=p.occurred_at.date().isoformat()
+
     with connect() as con:
         ex=con.execute('SELECT * FROM transactions WHERE external_hash=?',(h,)).fetchone()
-        if ex: return tx_from_row(ex),False
-        cur=con.execute('''INSERT INTO transactions(external_hash,occurred_at,created_at,amount_minor,currency,direction,operation_type,physical_account,merchant,description,balance_after_minor,raw_sms,origin,status)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,\'sms\',\'pending\')''',(h,p.occurred_at.isoformat(),now_iso(),to_minor(p.amount),p.currency,p.direction,operation_type_from_parsed(p),p.card_mask,p.merchant,p.description,to_minor(p.balance_after) if p.balance_after is not None else None,raw))
+        if ex:
+            return tx_from_row(ex),False
+        source_marker='system:cash_withdrawal' if p.operation_hint=='cash' else None
+        cur=con.execute(
+            """INSERT INTO transactions(
+                external_hash,occurred_at,created_at,amount_minor,currency,
+                direction,operation_type,physical_account,merchant,description,
+                balance_after_minor,raw_sms,source,origin,status,
+                amount_byn_minor,fx_rate,fx_rate_date
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'sms','pending',?,?,?)""",
+            (
+                h,p.occurred_at.isoformat(),now_iso(),to_minor(p.amount),p.currency,
+                p.direction,operation_type_from_parsed(p),p.card_mask,p.merchant,p.description,
+                to_minor(p.balance_after) if p.balance_after is not None else None,
+                raw,source_marker,amount_byn_minor,fx_rate_value,fx_date_value
+            )
+        )
         return tx_from_row(con.execute('SELECT * FROM transactions WHERE id=?',(cur.lastrowid,)).fetchone()),True
-
 def create_manual_transaction(amount,description,user_id,currency='BYN'):
+    currency=currency.upper()
+    amount_byn_minor=to_minor(amount) if currency=='BYN' else None
+    fx_rate='1' if currency=='BYN' else None
+    fx_rate_date=datetime.now().date().isoformat() if currency=='BYN' else None
     with connect() as con:
-        cur=con.execute('''INSERT INTO transactions(occurred_at,created_at,amount_minor,currency,direction,operation_type,physical_account,description,merchant,origin,status,source)
-        VALUES(?,?,?,?,\'out\',\'expense\',\'cash\',?,?,\'manual\',\'pending\',?)''',(datetime.now().isoformat(timespec='seconds'),now_iso(),to_minor(amount),currency.upper(),description or 'Ручная операция',description or None,f'telegram:{user_id}'))
+        cur=con.execute(
+            """INSERT INTO transactions(
+                occurred_at,created_at,amount_minor,currency,direction,operation_type,
+                physical_account,description,merchant,origin,status,source,
+                amount_byn_minor,fx_rate,fx_rate_date
+            )
+            VALUES(?,?,?,?,'out','expense','cash',?,?,'manual','pending',?,?,?,?)""",
+            (
+                datetime.now().isoformat(timespec='seconds'),now_iso(),to_minor(amount),currency,
+                description or 'Ручная операция',description or None,f'telegram:{user_id}',
+                amount_byn_minor,fx_rate,fx_rate_date
+            )
+        )
         return tx_from_row(con.execute('SELECT * FROM transactions WHERE id=?',(cur.lastrowid,)).fetchone())
-
 def get_transaction(tx_id):
     with connect() as con:
         r=con.execute('SELECT * FROM transactions WHERE id=?',(tx_id,)).fetchone(); return tx_from_row(r) if r else None
@@ -94,14 +166,23 @@ def update_transaction(tx_id,**kwargs):
     return tx
 
 def reset_transaction(tx_id):
-    with connect() as con: con.execute("UPDATE transactions SET scope=NULL,category_code=NULL,status='pending' WHERE id=?",(tx_id,))
+    tx=get_transaction(tx_id)
+    if not tx:
+        return None
+    original_type='cash_withdrawal' if tx.source=='system:cash_withdrawal' else tx.operation_type
+    original_direction='out' if original_type=='cash_withdrawal' else tx.direction
+    with connect() as con:
+        con.execute("UPDATE transactions SET scope=NULL,category_code=NULL,status='pending',operation_type=?,direction=? WHERE id=?",(original_type,original_direction,tx_id))
     return get_transaction(tx_id)
 
 def find_rule(merchant,operation_type):
     if not merchant: return None
     n=merchant.upper().strip()
     with connect() as con:
-        rows=con.execute('SELECT * FROM merchant_rules ORDER BY LENGTH(merchant_pattern) DESC').fetchall()
+        rows=con.execute(
+            'SELECT * FROM merchant_rules WHERE operation_type=? ORDER BY LENGTH(merchant_pattern) DESC',
+            (operation_type,)
+        ).fetchall()
         return next((r for r in rows if r['merchant_pattern'].upper() in n),None)
 
 def save_rule(merchant,scope,operation_type,category_code):
@@ -122,7 +203,34 @@ def all_reserve_transactions(end_iso=None):
     with connect() as con: return [tx_from_row(r) for r in con.execute(sql+' ORDER BY occurred_at',params).fetchall()]
 
 def export_rows():
-    with connect() as con: return [dict(r) for r in con.execute('''SELECT id,occurred_at,amount_minor,currency,direction,operation_type,physical_account,scope,category_code,source,merchant,description,balance_after_minor,origin,status FROM transactions ORDER BY occurred_at DESC''').fetchall()]
+    with connect() as con:
+        return [dict(r) for r in con.execute(
+            """SELECT id,occurred_at,amount_minor,currency,amount_byn_minor,fx_rate,fx_rate_date,
+                      direction,operation_type,physical_account,scope,category_code,source,
+                      merchant,description,balance_after_minor,origin,status
+               FROM transactions ORDER BY occurred_at DESC"""
+        ).fetchall()]
+
+def list_missing_fx_transactions(limit=500):
+    with connect() as con:
+        rows=con.execute(
+            """SELECT * FROM transactions
+               WHERE currency!='BYN' AND amount_byn_minor IS NULL
+               ORDER BY occurred_at ASC LIMIT ?""",
+            (limit,)
+        ).fetchall()
+        return [tx_from_row(r) for r in rows]
+
+def set_fx_conversion(tx_id,amount_byn,fx_rate,fx_rate_date):
+    date_value=fx_rate_date.isoformat() if hasattr(fx_rate_date,'isoformat') else str(fx_rate_date)
+    with connect() as con:
+        con.execute(
+            """UPDATE transactions
+               SET amount_byn_minor=?,fx_rate=?,fx_rate_date=?
+               WHERE id=?""",
+            (to_minor(amount_byn),str(fx_rate),date_value,tx_id)
+        )
+    return get_transaction(tx_id)
 
 
 def set_opening_balance(bucket, amount):
