@@ -72,6 +72,11 @@ CATEGORIES=[
     Category('reserve_to_family','Из НЗ в семью','🏠','marketing','transfer'),
     Category('own_transfer','Перевод между своими счетами','🔄','internal','transfer'),
     Category('refund','Возврат','↩️','internal','refund'),
+    Category('marketing_to_family','Маркетинг → Семья','↔️','internal','transfer'),
+    Category('family_to_debt','Семья → Долг','💳','internal','transfer'),
+    Category('marketing_to_debt','Маркетинг → Долг','💳','internal','transfer'),
+    Category('reserve_to_debt','НЗ → Долг','💳','internal','transfer'),
+    Category('debt_payment','Погашение долга','💳','internal','transfer'),
 ]
 BY_CODE={c.code:c for c in CATEGORIES}
 
@@ -80,11 +85,6 @@ def roots(scope,kind):
 
 def children(parent_code):
     return [c for c in CATEGORIES if c.parent==parent_code
-    Category('marketing_to_family','Маркетинг → Семья','↔️','internal','transfer'),
-    Category('family_to_debt','Семья → Долг','💳','internal','transfer'),
-    Category('marketing_to_debt','Маркетинг → Долг','💳','internal','transfer'),
-    Category('reserve_to_debt','НЗ → Долг','💳','internal','transfer'),
-    Category('debt_payment','Погашение долга','💳','internal','transfer'),
 ]
 
 def title(code):
