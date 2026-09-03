@@ -43,7 +43,6 @@ CATEGORIES=[
     Category('beauty_kirill','Кирилл','👨','family','expense','beauty'),
     Category('obligatory','Обязательные платежи','📌','family','expense'),
     Category('credit','Кредиты','🏦','family','expense','obligatory'),
-    Category('mortgage_payment','Кредит на квартиру','🏠','internal','expense','obligatory'),
     Category('internet_phone','Интернет / связь','📱','family','expense','obligatory'),
     Category('insurance','Страхование','🛡','family','expense','obligatory'),
     Category('shopping','Покупки','🛍','family','expense'),
@@ -84,8 +83,8 @@ def roots(scope,kind):
     return [c for c in CATEGORIES if c.scope==scope and c.kind==kind and c.parent is None]
 
 def children(parent_code):
-    return [c for c in CATEGORIES if c.parent==parent_code
-]
+    return [c for c in CATEGORIES if c.parent==parent_code]
+
 
 def title(code):
     if not code: return '—'

@@ -365,3 +365,14 @@ Added a consolidated financial picture:
 - Debt overview
 
 The goal is to see not only expenses, but the whole financial position.
+
+
+## v2.0 changes
+- Removed mortgage/loan concept. Debt is tracked separately.
+- Added family/marketing/reserve to debt transfers.
+- Added marketing to family transfer.
+- Added categories:
+  - Beauty: wife, Kirill
+  - Car: wash, repair, parts
+  - Sport: equipment, cards/memberships
+- Added foundation for custom categories/subcategories.
