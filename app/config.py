@@ -27,6 +27,7 @@ class Settings:
     store_raw_sms: bool
     debt_initial_balance: Decimal
     debt_currency: str
+    debt_annual_rate: Decimal
 
     @classmethod
     def from_env(cls):
