@@ -7,7 +7,7 @@ from app.categories import BY_CODE,children,roots,title
 from app.config import settings
 from app.db import (
     clear_user_state,create_manual_transaction,create_sms_transaction,find_rule,get_transaction,get_user_state,
-    list_pending,loan_payment_details,loan_summary,query_transactions,reset_transaction,save_rule,set_opening_balance,set_telegram_message,
+    list_pending,debt_payment_details,debt_summary,query_transactions,reset_transaction,save_rule,set_opening_balance,set_telegram_message,
     set_user_state,update_transaction
 )
 from app.exchange import convert_byn,convert_foreign_to_byn,get_byn_rates
@@ -172,7 +172,7 @@ def finalized_text(tx):
     elif tx.category_code=='reserve_to_family':
         lines.append('Перемещение: 🛡 НЗ → 🏠 Семья')
     elif tx.category_code=='mortgage_payment':
-        loan=loan_payment_details(tx.id)
+        loan=debt_payment_details(tx.id)
         if loan:
             lines += [
                 '',
@@ -185,7 +185,7 @@ def finalized_text(tx):
             if loan['excess_minor']:
                 lines.append(f"• Переплата сверх тела: {Decimal(loan['excess_minor'])/100:.2f} BYN")
         else:
-            summary=loan_summary()
+            summary=debt_summary()
             lines += [
                 '',
                 f"⚠️ Платёж не уменьшает стартовый долг, потому что дата операции раньше {summary['start_date']}.",
@@ -308,13 +308,13 @@ async def show_operations_page(chat_id,scope,start,end,page=0):
     )
 
 
-def loan_keyboard():
+def debt_keyboard():
     return markup([
         [b('🏠 Семья → кредит','loanpay:family'),b('📈 Маркетинг → кредит','loanpay:marketing')]
     ])
 
-def loan_text():
-    info=loan_summary()
+def debt_text():
+    info=debt_summary()
     initial=Decimal(info['initial_principal_minor'])/100
     balance=Decimal(info['balance_minor'])/100
     paid=Decimal(info['total_payment_minor'])/100
@@ -379,7 +379,7 @@ async def balances_text():
             if 'EUR' in c: p.append(f"€{c['EUR']:.2f}")
             if p: s+=' ≈ '+' / '.join(p)
         return s
-    loan=loan_summary()
+    loan=debt_summary()
     return '\n'.join([
         '💰 БАЛАНСЫ','',
         line('🏠 Семья',balances['family']),
@@ -719,7 +719,7 @@ async def handle_message(msg):
     if text=='💰 Балансы':
         await send_text(await balances_text(),chat_id=chat_id,reply_markup=balances_keyboard()); return
     if text=='🏦 Кредит':
-        await send_text(loan_text(),chat_id=chat_id,reply_markup=loan_keyboard()); return
+        await send_text(debt_text(),chat_id=chat_id,reply_markup=debt_keyboard()); return
     if text=='⏳ Разобрать': text='/pending'
     elif text=='ℹ️ Помощь': text='/help'
 
@@ -733,7 +733,7 @@ async def handle_message(msg):
     if command=='/balances':
         await send_text(await balances_text(),chat_id=chat_id,reply_markup=balances_keyboard()); return
     if command=='/loan':
-        await send_text(loan_text(),chat_id=chat_id,reply_markup=loan_keyboard()); return
+        await send_text(debt_text(),chat_id=chat_id,reply_markup=debt_keyboard()); return
     if command in {'/operations','/ops'}:
         await send_text('Какое направление показать?',chat_id=chat_id,reply_markup=operations_scope_keyboard()); return
     if command=='/stats':
