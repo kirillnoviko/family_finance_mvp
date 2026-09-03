@@ -55,6 +55,7 @@ class Settings:
             store_raw_sms=os.getenv('STORE_RAW_SMS','false').lower() in {'1','true','yes','on'},
             debt_initial_balance=Decimal(os.getenv('DEBT_INITIAL_BALANCE','8000').replace(',','.')),
             debt_currency=os.getenv('DEBT_CURRENCY','EUR').strip(),
+            debt_annual_rate=Decimal(os.getenv('DEBT_ANNUAL_RATE','0').replace(',','.')),
         )
 
 settings=Settings.from_env()
