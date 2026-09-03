@@ -1,7 +1,7 @@
 import hashlib, sqlite3, json
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from app.categories import CATEGORIES
 from app.config import settings
@@ -45,10 +45,26 @@ def init_db():
           amount_minor INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS custom_categories(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          code TEXT UNIQUE NOT NULL,
+          title TEXT NOT NULL,
+          parent_code TEXT,
+          scope TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS user_states(
           user_id INTEGER PRIMARY KEY,
           state TEXT NOT NULL,
           payload_json TEXT NOT NULL DEFAULT '{}',
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS debt_settings(
+          id INTEGER PRIMARY KEY CHECK(id=1),
+          initial_principal_minor INTEGER NOT NULL,
+          annual_rate TEXT NOT NULL,
+          start_date TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
         ''')
@@ -67,6 +83,18 @@ def init_db():
                            fx_rate=COALESCE(fx_rate,'1'),
                            fx_rate_date=COALESCE(fx_rate_date,substr(occurred_at,1,10))
                        WHERE currency='BYN' AND amount_byn_minor IS NULL""")
+
+        con.execute(
+            '''INSERT OR IGNORE INTO debt_settings(
+                id,initial_principal_minor,annual_rate,start_date,updated_at
+            ) VALUES(1,?,?,?,?)''',
+            (
+                to_minor(settings.debt_initial_balance),
+                str(settings.debt_annual_rate),
+                settings.debt_start_date,
+                now_iso(),
+            )
+        )
 
         for c in CATEGORIES:
             con.execute('''INSERT INTO categories(code,title,emoji,scope,kind,parent_code) VALUES(?,?,?,?,?,?)
@@ -260,6 +288,129 @@ def get_opening_balances():
         'marketing':get_opening_balance('marketing'),
         'reserve':get_opening_balance('reserve'),
     }
+
+
+def get_debt_settings():
+    with connect() as con:
+        row=con.execute(
+            "SELECT initial_principal_minor,annual_rate,start_date FROM debt_settings WHERE id=1"
+        ).fetchone()
+    if not row:
+        return {
+            'initial_principal_minor':to_minor(settings.debt_initial_balance),
+            'annual_rate':settings.debt_annual_rate,
+            'start_date':settings.debt_start_date,
+        }
+    return {
+        'initial_principal_minor':int(row['initial_principal_minor']),
+        'annual_rate':Decimal(str(row['annual_rate'])),
+        'start_date':row['start_date'],
+    }
+
+
+def _debt_month_interest_minor(principal_minor, annual_rate):
+    # principal_minor is in kopecks. Decimal math stays in minor units and
+    # rounds the monthly interest to the nearest kopeck.
+    return int(
+        (
+            Decimal(principal_minor)
+            * Decimal(str(annual_rate))
+            / Decimal('1200')
+        ).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
+    )
+
+
+def debt_ledger():
+    cfg=get_debt_settings()
+    principal=int(cfg['initial_principal_minor'])
+    annual_rate=Decimal(str(cfg['annual_rate']))
+    start_date=cfg['start_date']
+
+    with connect() as con:
+        rows=con.execute(
+            """SELECT * FROM transactions
+               WHERE status='categorized'
+                 AND category_code='debt_payment'
+                 AND occurred_at>=?
+               ORDER BY occurred_at,id""",
+            (start_date,)
+        ).fetchall()
+
+    entries=[]
+    active_month=None
+    interest_remaining=0
+    interest_assessed=0
+
+    for row in rows:
+        tx=tx_from_row(row)
+        amount=tx.report_amount_minor
+        if amount<=0:
+            continue
+
+        month=tx.occurred_at[:7]
+        if month!=active_month:
+            active_month=month
+            interest_assessed=_debt_month_interest_minor(principal,annual_rate)
+            interest_remaining=interest_assessed
+
+        balance_before=principal
+        interest_paid=min(amount,interest_remaining)
+        interest_remaining-=interest_paid
+
+        after_interest=amount-interest_paid
+        principal_paid=min(after_interest,principal)
+        principal-=principal_paid
+        excess=after_interest-principal_paid
+
+        entries.append({
+            'transaction_id':tx.id,
+            'occurred_at':tx.occurred_at,
+            'month':month,
+            'scope':tx.scope,
+            'payment_minor':amount,
+            'interest_assessed_minor':interest_assessed,
+            'interest_paid_minor':interest_paid,
+            'principal_paid_minor':principal_paid,
+            'excess_minor':excess,
+            'balance_before_minor':balance_before,
+            'balance_after_minor':principal,
+            'interest_remaining_minor':interest_remaining,
+        })
+
+    return {
+        'initial_principal_minor':int(cfg['initial_principal_minor']),
+        'annual_rate':annual_rate,
+        'start_date':start_date,
+        'balance_minor':principal,
+        'entries':entries,
+        'active_month':active_month,
+        'active_month_interest_remaining_minor':interest_remaining if entries else 0,
+    }
+
+
+def debt_payment_details(tx_id):
+    ledger=debt_ledger()
+    for entry in ledger['entries']:
+        if entry['transaction_id']==tx_id:
+            return entry
+    return None
+
+
+def debt_summary():
+    ledger=debt_ledger()
+    total_payment=sum(x['payment_minor'] for x in ledger['entries'])
+    total_interest=sum(x['interest_paid_minor'] for x in ledger['entries'])
+    total_principal=sum(x['principal_paid_minor'] for x in ledger['entries'])
+    return {
+        **ledger,
+        'total_payment_minor':total_payment,
+        'total_interest_minor':total_interest,
+        'total_principal_minor':total_principal,
+        'estimated_month_interest_minor':_debt_month_interest_minor(
+            ledger['balance_minor'],ledger['annual_rate']
+        ),
+    }
+
 
 def set_user_state(user_id,state,payload=None):
     with connect() as con:

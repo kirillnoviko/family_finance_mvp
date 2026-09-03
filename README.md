@@ -259,3 +259,109 @@ Each report shows:
 - balance at the end of the selected period
 
 For a current period whose end is today or later, `Баланс на конец` matches the corresponding value in `💰 Балансы` because both are calculated by the same function.
+
+
+## v1.6 — subcategory expense analytics
+
+Family statistics now show expense percentages by the actual selected
+subcategory, not by the broad parent group.
+
+Example:
+
+- Продукты — 60%
+- Кафе / рестораны — 20%
+- Такси — 20%
+
+Each percentage is calculated against all family expenses in the selected
+period.
+
+For broad categories that have children (Еда, Дом, Транспорт, Дети,
+Здоровье, Обязательные платежи, Покупки, Досуг), new transactions must
+choose a concrete subcategory. The previous "Оставить <родительскую
+категорию>" button is removed.
+
+Existing historical transactions that were already saved only at parent
+level remain valid and appear as "<Категория> — без уточнения" so they are
+not silently omitted from reports.
+
+
+## v1.7 — beauty, car, sport and apartment-loan tracker
+
+New Family categories:
+
+- Красота
+  - Жена
+  - Кирилл
+- Транспорт → Авто
+  - Мойка
+  - Ремонт авто
+  - Запчасти
+- Спорт
+  - Инвентарь
+  - Карты / абонементы
+
+Apartment loan defaults:
+
+- opening principal: 35,536 BYN
+- annual rate: 14.56%
+- accounting start date: 2026-08-14
+
+They can be overridden before the first deployment with:
+
+- LOAN_INITIAL_BALANCE
+- LOAN_ANNUAL_RATE
+- LOAN_START_DATE
+
+Loan payments can be recorded from either Family or Marketing. The full cash
+payment reduces the selected source balance. The loan ledger then splits it
+into monthly interest and principal.
+
+Simplified allocation rule requested by the user:
+
+- on the first loan payment in a calendar month, monthly interest is assessed
+  as `remaining principal * annual rate / 12`
+- payments first cover that month's remaining interest
+- the rest reduces principal
+- later payments in the same calendar month go directly to principal once
+  monthly interest has been fully covered
+- the next calendar month recalculates interest using the then-current principal
+
+Transactions before LOAN_START_DATE do not reduce the configured opening
+principal, because that opening principal is treated as the debt as of the
+start date.
+
+A new `🏦 Кредит` screen shows principal remaining, total payments, total
+interest, total principal reduction, and direct payment buttons for Family
+and Marketing.
+
+
+## v1.8 changes
+
+- Removed apartment mortgage logic.
+- Added general debt tracking (example: 8000 EUR debt).
+- Added transfers:
+  - Marketing -> Family
+  - Family -> Debt
+  - Marketing -> Debt
+  - Reserve -> Debt
+- Debt balance is tracked separately and does not inflate income/expenses.
+- Added foundation for custom categories/subcategories.
+- Statistics should use selected category/subcategory, not only parent groups.
+
+Debt parameters:
+- currency: EUR
+- initial amount: configurable
+- payments can come from Family, Marketing or Reserve.
+
+
+## v1.9 Financial overview
+
+Added a consolidated financial picture:
+
+- Family balance
+- Marketing balance
+- Reserve balance
+- Total available money
+- Debt overview
+
+The goal is to see not only expenses, but the whole financial position.

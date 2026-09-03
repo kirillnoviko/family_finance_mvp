@@ -125,9 +125,8 @@ def family_report(s,e):
 
     byexp=defaultdict(int)
     for t in expenses:
-        c=BY_CODE.get(t.category_code or 'family_other_expense')
-        root=c.parent if c and c.parent else (t.category_code or 'family_other_expense')
-        byexp[root]+=t.report_amount_minor
+        code=t.category_code or 'family_other_expense'
+        byexp[code]+=t.report_amount_minor
 
     inflow=earned+rz_in
     usable=opening+inflow
@@ -154,10 +153,15 @@ def family_report(s,e):
         ]
 
     if byexp:
-        lines+=['','💸 Расходы:']+[
-            f'• {title(c)} — {money(a)} ({pct(a,spent)})'
-            for c,a in sorted(byexp.items(),key=lambda x:x[1],reverse=True)
-        ]
+        expense_lines=[]
+        for code,amount in sorted(byexp.items(),key=lambda x:x[1],reverse=True):
+            c=BY_CODE.get(code)
+            if c and c.parent is None and any(x.parent==code for x in BY_CODE.values()):
+                label_text=f'{c.emoji} {c.title} — без уточнения'
+            else:
+                label_text=title(code)
+            expense_lines.append(f'• {label_text} — {money(amount)} ({pct(amount,spent)})')
+        lines+=['','💸 Расходы по подкатегориям:']+expense_lines
 
     if missing_fx:
         lines+=['',f'⚠️ Для {len(missing_fx)} валютных операций пока не удалось получить исторический курс НБРБ; они временно не входят в BYN-итоги.']
@@ -176,8 +180,9 @@ def marketing_report(s,e):
     salary=sum(t.report_amount_minor for t in tx if t.category_code=='assistant_salary')
     tax=sum(t.report_amount_minor for t in tx if t.category_code=='tax')
     business=sum(t.report_amount_minor for t in tx if t.category_code=='business_expense')
+    mortgage=sum(t.report_amount_minor for t in tx if t.category_code=='mortgage_payment')
     reserve=sum(t.report_amount_minor for t in tx if t.category_code=='reserve_contribution')
-    expenses=salary+tax+business
+    expenses=salary+tax+business+mortgage
     change=closing-opening
 
     bysrc=defaultdict(int)
@@ -204,6 +209,7 @@ def marketing_report(s,e):
             f'• 👩‍💻 Зарплаты — {money(salary)} ({pct(salary,income)})',
             f'• 🏛 Налог — {money(tax)} ({pct(tax,income)})',
             f'• 📦 Прочие расходы бизнеса — {money(business)} ({pct(business,income)})',
+            f'• 🏠 Кредит на квартиру — {money(mortgage)} ({pct(mortgage,income)})',
             f'• 🛡 В НЗ — {money(reserve)} ({pct(reserve,income)})']
 
     if missing_fx:

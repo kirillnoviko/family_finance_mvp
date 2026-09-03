@@ -7,7 +7,7 @@ from app.categories import BY_CODE,children,roots,title
 from app.config import settings
 from app.db import (
     clear_user_state,create_manual_transaction,create_sms_transaction,find_rule,get_transaction,get_user_state,
-    list_pending,query_transactions,reset_transaction,save_rule,set_opening_balance,set_telegram_message,
+    list_pending,loan_payment_details,loan_summary,query_transactions,reset_transaction,save_rule,set_opening_balance,set_telegram_message,
     set_user_state,update_transaction
 )
 from app.exchange import convert_byn,convert_foreign_to_byn,get_byn_rates
@@ -29,7 +29,8 @@ def main_keyboard():
         'keyboard':[
             [{'text':'➕ Добавить'},{'text':'📊 Статистика'}],
             [{'text':'📋 Операции'},{'text':'💰 Балансы'}],
-            [{'text':'⏳ Разобрать'},{'text':'ℹ️ Помощь'}]
+            [{'text':'🏦 Кредит'},{'text':'⏳ Разобрать'}],
+            [{'text':'ℹ️ Помощь'}]
         ],
         'resize_keyboard':True,
         'is_persistent':True
@@ -76,6 +77,7 @@ async def setup_webhook():
         {'command':'stats','description':'Статистика'},
         {'command':'operations','description':'Список операций'},
         {'command':'balances','description':'Балансы'},
+        {'command':'loan','description':'Кредит на квартиру'},
         {'command':'pending','description':'Неразобранные операции'},
         {'command':'help','description':'Помощь'}
     ]})
@@ -132,7 +134,7 @@ def category_keyboard(tx,scope):
     if tx.direction=='in':
         cats=[BY_CODE['salary_kirill'],BY_CODE['salary_wife'],BY_CODE['family_other_income'],BY_CODE['reserve_to_family']] if scope=='family' else [BY_CODE['marketing_client_income'],BY_CODE['marketing_other_income']]
     else:
-        cats=[BY_CODE['assistant_salary'],BY_CODE['tax'],BY_CODE['business_expense'],BY_CODE['reserve_contribution']] if scope=='marketing' else roots('family','expense')+[BY_CODE['reserve_from_family']]
+        cats=[BY_CODE['assistant_salary'],BY_CODE['tax'],BY_CODE['business_expense'],BY_CODE['mortgage_payment'],BY_CODE['reserve_contribution']] if scope=='marketing' else roots('family','expense')+[BY_CODE['reserve_from_family']]
     rows=[]
     for i in range(0,len(cats),2):
         rows.append([b(f'{c.emoji} {c.title}',f'cat:{tx.id}:{c.code}') for c in cats[i:i+2]])
@@ -143,7 +145,6 @@ def subcategory_keyboard(tx,parent):
     cats=children(parent); rows=[]
     for i in range(0,len(cats),2):
         rows.append([b(f'{c.emoji} {c.title}',f'cat:{tx.id}:{c.code}') for c in cats[i:i+2]])
-    rows.append([b(f"✅ Оставить «{BY_CODE[parent].title}»",f'final:{tx.id}:{parent}')])
     rows.append([b('⬅️ Назад',f'scope:{tx.id}:family')])
     return markup(rows)
 
@@ -170,6 +171,25 @@ def finalized_text(tx):
         lines.append('Перемещение: 🏠 Семья → 🛡 НЗ')
     elif tx.category_code=='reserve_to_family':
         lines.append('Перемещение: 🛡 НЗ → 🏠 Семья')
+    elif tx.category_code=='mortgage_payment':
+        loan=loan_payment_details(tx.id)
+        if loan:
+            lines += [
+                '',
+                '🏦 Кредит на квартиру:',
+                f"• Платёж: {Decimal(loan['payment_minor'])/100:.2f} BYN",
+                f"• Проценты: {Decimal(loan['interest_paid_minor'])/100:.2f} BYN",
+                f"• В тело: {Decimal(loan['principal_paid_minor'])/100:.2f} BYN",
+                f"• Остаток тела: {Decimal(loan['balance_after_minor'])/100:.2f} BYN",
+            ]
+            if loan['excess_minor']:
+                lines.append(f"• Переплата сверх тела: {Decimal(loan['excess_minor'])/100:.2f} BYN")
+        else:
+            summary=loan_summary()
+            lines += [
+                '',
+                f"⚠️ Платёж не уменьшает стартовый долг, потому что дата операции раньше {summary['start_date']}.",
+            ]
     if tx.source and not tx.source.startswith(('telegram:','system:')): lines.append(f'Источник: {tx.source}')
     return '\n'.join(lines)
 
@@ -183,6 +203,7 @@ def manual_flow_keyboard():
     return markup([
         [b('🏠 Расход семьи','manual:family_expense'),b('🏠 Доход семьи','manual:family_income')],
         [b('📈 Расход маркетинга','manual:marketing_expense'),b('📈 Доход маркетинга','manual:marketing_income')],
+        [b('🏠 Семья → кредит','manual:loan_family'),b('📈 Маркетинг → кредит','manual:loan_marketing')],
         [b('🏠 Семья → НЗ','manual:reserve_from_family'),b('📈 Маркетинг → НЗ','manual:reserve_from_marketing')],
         [b('🛡 НЗ → Семья','manual:reserve_out')]
     ])
@@ -286,6 +307,45 @@ async def show_operations_page(chat_id,scope,start,end,page=0):
         reply_markup=operations_page_keyboard(scope,start,end,page,pages)
     )
 
+
+def loan_keyboard():
+    return markup([
+        [b('🏠 Семья → кредит','loanpay:family'),b('📈 Маркетинг → кредит','loanpay:marketing')]
+    ])
+
+def loan_text():
+    info=loan_summary()
+    initial=Decimal(info['initial_principal_minor'])/100
+    balance=Decimal(info['balance_minor'])/100
+    paid=Decimal(info['total_payment_minor'])/100
+    interest=Decimal(info['total_interest_minor'])/100
+    principal=Decimal(info['total_principal_minor'])/100
+    estimated=Decimal(info['estimated_month_interest_minor'])/100
+    lines=[
+        '🏦 КРЕДИТ НА КВАРТИРУ','',
+        f"Старт учёта: {info['start_date']}",
+        f"Начальный долг: {initial:.2f} BYN",
+        f"Ставка: {info['annual_rate']}% годовых",
+        '',
+        f"💳 Внесено после старта: {paid:.2f} BYN",
+        f"💸 Из них проценты: {interest:.2f} BYN",
+        f"📉 В тело кредита: {principal:.2f} BYN",
+        f"🏦 Остаток тела: {balance:.2f} BYN",
+        '',
+        f"Ориентир процентов на первый платёж нового месяца: {estimated:.2f} BYN",
+        f"Расчёт: остаток тела × {info['annual_rate']}% / 12.",
+    ]
+    if info['entries']:
+        last=info['entries'][-1]
+        if last['interest_remaining_minor']>0:
+            lines.append(
+                f"⚠️ В месяце {last['month']} осталось закрыть процентов: "
+                f"{Decimal(last['interest_remaining_minor'])/100:.2f} BYN"
+            )
+        else:
+            lines.append(f"✅ Проценты месяца {last['month']} уже закрыты; следующий платёж этого месяца идёт в тело.")
+    return '\n'.join(lines)
+
 def balances_keyboard():
     return markup([
         [b('🏠 Старт семьи','openbal:family'),b('📈 Старт маркетинга','openbal:marketing')],
@@ -319,11 +379,13 @@ async def balances_text():
             if 'EUR' in c: p.append(f"€{c['EUR']:.2f}")
             if p: s+=' ≈ '+' / '.join(p)
         return s
+    loan=loan_summary()
     return '\n'.join([
         '💰 БАЛАНСЫ','',
         line('🏠 Семья',balances['family']),
         line('📈 Маркетинг',balances['marketing'],True),
         line('🛡 НЗ',balances['reserve'],True),
+        f"🏦 Долг по квартире: {Decimal(loan['balance_minor'])/100:.2f} BYN",
         '',
         'Стартовые остатки не создают доход или расход.'
     ])
@@ -384,6 +446,12 @@ async def handle_callback(cb):
         await answer_callback(cid,'Нет доступа'); return
     try:
         p=data.split(':'); action=p[0]
+        if action=='loanpay':
+            scope=p[1]
+            flow='loan_family' if scope=='family' else 'loan_marketing'
+            set_user_state(uid,'manual_add',{'flow':flow})
+            await send_text('Введите сумму платежа по кредиту.\nНапример:\n1200 кредит',chat_id=chat_id,reply_markup=force_reply())
+            await answer_callback(cid); return
         if action=='opshome':
             await send_text('Какое направление показать?',chat_id=chat_id,reply_markup=operations_scope_keyboard())
             await answer_callback(cid); return
@@ -564,6 +632,20 @@ async def handle_state_reply(msg,uid,state):
         elif flow=='marketing_income':
             tx=update_transaction(tx.id,scope='marketing',operation_type='income',direction='in',source=desc)
             mid=await send_text(header(tx)+'\n\n📈 Доход маркетинга\nВыберите тип:',chat_id=chat_id,reply_markup=category_keyboard(tx,'marketing'))
+        elif flow=='loan_family':
+            tx=update_transaction(
+                tx.id,scope='family',category_code='mortgage_payment',
+                operation_type='expense',direction='out',status='categorized',
+                source='Семья'
+            )
+            mid=await send_text(finalized_text(tx),chat_id=chat_id,reply_markup=finalized_keyboard(tx))
+        elif flow=='loan_marketing':
+            tx=update_transaction(
+                tx.id,scope='marketing',category_code='mortgage_payment',
+                operation_type='expense',direction='out',status='categorized',
+                source='Маркетинг'
+            )
+            mid=await send_text(finalized_text(tx),chat_id=chat_id,reply_markup=finalized_keyboard(tx))
         elif flow=='reserve_from_marketing':
             tx=update_transaction(
                 tx.id,scope='marketing',category_code='reserve_contribution',
@@ -636,6 +718,8 @@ async def handle_message(msg):
         await send_text('Какое направление показать?',chat_id=chat_id,reply_markup=operations_scope_keyboard()); return
     if text=='💰 Балансы':
         await send_text(await balances_text(),chat_id=chat_id,reply_markup=balances_keyboard()); return
+    if text=='🏦 Кредит':
+        await send_text(loan_text(),chat_id=chat_id,reply_markup=loan_keyboard()); return
     if text=='⏳ Разобрать': text='/pending'
     elif text=='ℹ️ Помощь': text='/help'
 
@@ -645,9 +729,11 @@ async def handle_message(msg):
     if command in {'/start','/menu'}:
         await show_main(chat_id); return
     if command=='/help':
-        await send_text('Основные действия теперь доступны кнопками.\n\n«📋 Операции» показывает журнал по семье, маркетингу или НЗ за выбранный период.\n\nСтартовый НЗ задавайте через «💰 Балансы».\nДля пополнения НЗ выбирайте отдельно «🏠 Семья → НЗ» или «📈 Маркетинг → НЗ». Это перемещение между контурами, а не расход.',chat_id=chat_id,reply_markup=main_keyboard()); return
+        await send_text('Основные действия теперь доступны кнопками.\n\n«🏦 Кредит» показывает остаток тела, проценты и позволяет внести платёж из семьи или маркетинга.\n\n«📋 Операции» показывает журнал по семье, маркетингу или НЗ за выбранный период.\n\nСтартовый НЗ задавайте через «💰 Балансы».\nДля пополнения НЗ выбирайте отдельно «🏠 Семья → НЗ» или «📈 Маркетинг → НЗ». Это перемещение между контурами, а не расход.',chat_id=chat_id,reply_markup=main_keyboard()); return
     if command=='/balances':
         await send_text(await balances_text(),chat_id=chat_id,reply_markup=balances_keyboard()); return
+    if command=='/loan':
+        await send_text(loan_text(),chat_id=chat_id,reply_markup=loan_keyboard()); return
     if command in {'/operations','/ops'}:
         await send_text('Какое направление показать?',chat_id=chat_id,reply_markup=operations_scope_keyboard()); return
     if command=='/stats':

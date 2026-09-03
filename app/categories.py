@@ -24,7 +24,10 @@ CATEGORIES=[
     Category('fuel','Топливо','⛽','family','expense','transport'),
     Category('public_transport','Общественный транспорт','🚌','family','expense','transport'),
     Category('parking','Парковка','🅿️','family','expense','transport'),
-    Category('car_service','Авто / обслуживание','🔧','family','expense','transport'),
+    Category('car_service','Авто','🚙','family','expense','transport'),
+    Category('car_wash','Мойка','🧽','family','expense','car_service'),
+    Category('car_repair','Ремонт авто','🔧','family','expense','car_service'),
+    Category('car_parts','Запчасти','⚙️','family','expense','car_service'),
     Category('children','Дети','👶','family','expense'),
     Category('kindergarten','Сад / школа','🎒','family','expense','children'),
     Category('child_education','Занятия / образование','📚','family','expense','children'),
@@ -35,8 +38,12 @@ CATEGORIES=[
     Category('pharmacy','Аптека','💊','family','expense','health'),
     Category('doctors','Врачи','🩺','family','expense','health'),
     Category('tests','Анализы','🧪','family','expense','health'),
+    Category('beauty','Красота','✨','family','expense'),
+    Category('beauty_wife','Жена','👩','family','expense','beauty'),
+    Category('beauty_kirill','Кирилл','👨','family','expense','beauty'),
     Category('obligatory','Обязательные платежи','📌','family','expense'),
     Category('credit','Кредиты','🏦','family','expense','obligatory'),
+    Category('mortgage_payment','Кредит на квартиру','🏠','internal','expense','obligatory'),
     Category('internet_phone','Интернет / связь','📱','family','expense','obligatory'),
     Category('insurance','Страхование','🛡','family','expense','obligatory'),
     Category('shopping','Покупки','🛍','family','expense'),
@@ -47,6 +54,9 @@ CATEGORIES=[
     Category('entertainment','Развлечения','🎬','family','expense','leisure'),
     Category('travel','Путешествия','✈️','family','expense','leisure'),
     Category('hobby','Хобби','🎨','family','expense','leisure'),
+    Category('sport','Спорт','🏃','family','expense'),
+    Category('sport_equipment','Инвентарь','🏋️','family','expense','sport'),
+    Category('sport_membership','Карты / абонементы','🎟','family','expense','sport'),
     Category('subscriptions','Подписки','🔁','family','expense'),
     Category('family_other_expense','Прочее','•••','family','expense'),
     Category('salary_kirill','Зарплата Кирилла','👨','family','income'),
@@ -69,7 +79,13 @@ def roots(scope,kind):
     return [c for c in CATEGORIES if c.scope==scope and c.kind==kind and c.parent is None]
 
 def children(parent_code):
-    return [c for c in CATEGORIES if c.parent==parent_code]
+    return [c for c in CATEGORIES if c.parent==parent_code
+    Category('marketing_to_family','Маркетинг → Семья','↔️','internal','transfer'),
+    Category('family_to_debt','Семья → Долг','💳','internal','transfer'),
+    Category('marketing_to_debt','Маркетинг → Долг','💳','internal','transfer'),
+    Category('reserve_to_debt','НЗ → Долг','💳','internal','transfer'),
+    Category('debt_payment','Погашение долга','💳','internal','transfer'),
+]
 
 def title(code):
     if not code: return '—'

@@ -38,7 +38,7 @@ async def lifespan(app):
     except Exception: logger.exception('Could not configure Telegram webhook')
     yield
 
-app=FastAPI(title='Family Finance Bot',version='1.5.0-mvp',docs_url='/docs',redoc_url=None,lifespan=lifespan)
+app=FastAPI(title='Family Finance Bot',version='1.9.0-mvp',docs_url='/docs',redoc_url=None,lifespan=lifespan)
 
 class SmsRequest(BaseModel):
     message:str=Field(min_length=1,max_length=5000)
@@ -50,7 +50,7 @@ def verify_bearer(auth):
     if not hmac.compare_digest(auth[7:].strip(),settings.api_secret): raise HTTPException(status_code=403,detail='Invalid API secret')
 
 @app.get('/health')
-async def health(): return {'status':'ok','version':'1.5.0-mvp'}
+async def health(): return {'status':'ok','version':'1.9.0-mvp'}
 
 @app.post('/api/sms')
 async def receive_sms(request:SmsRequest,authorization:str|None=Header(default=None)):

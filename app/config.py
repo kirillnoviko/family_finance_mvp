@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from decimal import Decimal
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,6 +25,9 @@ class Settings:
     database_path: str
     period_start_day: int
     store_raw_sms: bool
+    loan_initial_balance: Decimal
+    loan_annual_rate: Decimal
+    loan_start_date: str
 
     @classmethod
     def from_env(cls):
@@ -49,6 +53,9 @@ class Settings:
             database_path=os.getenv('DATABASE_PATH',default_db).strip(),
             period_start_day=day,
             store_raw_sms=os.getenv('STORE_RAW_SMS','false').lower() in {'1','true','yes','on'},
+            loan_initial_balance=Decimal(os.getenv('LOAN_INITIAL_BALANCE','35536').replace(',','.')),
+            loan_annual_rate=Decimal(os.getenv('LOAN_ANNUAL_RATE','14.56').replace(',','.')),
+            loan_start_date=os.getenv('LOAN_START_DATE','2026-08-14').strip(),
         )
 
 settings=Settings.from_env()
