@@ -28,6 +28,7 @@ class Settings:
     debt_initial_balance: Decimal
     debt_currency: str
     debt_annual_rate: Decimal
+    debt_start_date: str
 
     @classmethod
     def from_env(cls):
@@ -56,6 +57,7 @@ class Settings:
             debt_initial_balance=Decimal(os.getenv('DEBT_INITIAL_BALANCE','8000').replace(',','.')),
             debt_currency=os.getenv('DEBT_CURRENCY','EUR').strip(),
             debt_annual_rate=Decimal(os.getenv('DEBT_ANNUAL_RATE','0').replace(',','.')),
+            debt_start_date=os.getenv('DEBT_START_DATE','2026-01-01').strip(),
         )
 
 settings=Settings.from_env()

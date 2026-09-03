@@ -6,13 +6,13 @@ os.environ.setdefault('TELEGRAM_BOT_TOKEN','test')
 os.environ.setdefault('TELEGRAM_CHAT_ID','-100')
 os.environ.setdefault('API_SECRET','test')
 os.environ.setdefault('PERIOD_START_DAY','15')
-os.environ.setdefault('LOAN_INITIAL_BALANCE','35536')
+os.environ.setdefault('DEBT_INITIAL_BALANCE','35536')
 os.environ.setdefault('LOAN_ANNUAL_RATE','14.56')
 os.environ.setdefault('LOAN_START_DATE','2026-08-14')
 
 from app.categories import children
 from app.db import (
-    create_manual_transaction,init_db,loan_payment_details,loan_summary,
+    create_manual_transaction,init_db,debt_payment_details,debt_summary,
     set_opening_balance,update_transaction
 )
 from app.reporting import current_balances,marketing_report
@@ -44,7 +44,7 @@ def test_requested_categories_exist():
 def test_first_payment_month_pays_interest_then_principal():
     init_db()
     tx=add_loan(1000,'2026-08-14T10:00:00','family')
-    d=loan_payment_details(tx.id)
+    d=debt_payment_details(tx.id)
     assert d['interest_paid_minor']==43117
     assert d['principal_paid_minor']==56883
     assert d['balance_after_minor']==3496717
@@ -54,7 +54,7 @@ def test_second_payment_same_month_all_goes_to_principal():
     init_db()
     add_loan(1000,'2026-08-14T10:00:00','family')
     tx2=add_loan(500,'2026-08-20T10:00:00','marketing')
-    d=loan_payment_details(tx2.id)
+    d=debt_payment_details(tx2.id)
     assert d['interest_paid_minor']==0
     assert d['principal_paid_minor']==50000
     assert d['balance_after_minor']==3446717
@@ -65,7 +65,7 @@ def test_new_month_recalculates_interest_on_remaining_principal():
     add_loan(1000,'2026-08-14T10:00:00','family')
     add_loan(500,'2026-08-20T10:00:00','marketing')
     tx3=add_loan(1000,'2026-09-05T10:00:00','family')
-    d=loan_payment_details(tx3.id)
+    d=debt_payment_details(tx3.id)
     assert d['interest_paid_minor']==41820
     assert d['principal_paid_minor']==58180
     assert d['balance_after_minor']==3388537
