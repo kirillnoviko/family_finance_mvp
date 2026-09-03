@@ -8,7 +8,7 @@ from app.config import settings
 from app.db import (
     clear_user_state,create_manual_transaction,create_sms_transaction,find_rule,get_transaction,get_user_state,
     list_pending,debt_payment_details,debt_summary,query_transactions,reset_transaction,save_rule,set_opening_balance,set_telegram_message,
-    set_user_state,update_transaction
+    set_user_state,update_transaction,add_custom_category
 )
 from app.exchange import convert_byn,convert_foreign_to_byn,get_byn_rates
 from app.parser import IgnoredSms,parse_priorbank_sms
@@ -29,7 +29,8 @@ def main_keyboard():
         'keyboard':[
             [{'text':'➕ Добавить'},{'text':'📊 Статистика'}],
             [{'text':'📋 Операции'},{'text':'💰 Балансы'}],
-            [{'text':'🏦 Кредит'},{'text':'⏳ Разобрать'}],
+            [{'text':'➕ Категория'}],
+            [{'text':'💳 Долг'},{'text':'⏳ Разобрать'}],
             [{'text':'ℹ️ Помощь'}]
         ],
         'resize_keyboard':True,
@@ -716,6 +717,9 @@ async def handle_message(msg):
         await send_text('Выберите период:',chat_id=chat_id,reply_markup=periods_keyboard()); return
     if text=='📋 Операции':
         await send_text('Какое направление показать?',chat_id=chat_id,reply_markup=operations_scope_keyboard()); return
+    if text=='➕ Категория':
+        set_user_state(uid,'new_category',{'step':'scope'})
+        await send_text('Выберите направление: Семья / Маркетинг / НЗ',chat_id=chat_id,reply_markup=force_reply()); return
     if text=='💰 Балансы':
         await send_text(await balances_text(),chat_id=chat_id,reply_markup=balances_keyboard()); return
     if text=='🏦 Кредит':

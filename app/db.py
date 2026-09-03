@@ -451,3 +451,23 @@ def query_all_transactions(end_iso=None):
     sql+=' ORDER BY occurred_at'
     with connect() as con:
         return [tx_from_row(r) for r in con.execute(sql,params).fetchall()]
+
+
+def add_custom_category(title_value, scope, parent_code=None, emoji="📁"):
+    code = "custom_" + hashlib.sha1(f"{scope}:{parent_code}:{title_value}".encode()).hexdigest()[:10]
+    with connect() as con:
+        con.execute(
+            "INSERT OR IGNORE INTO custom_categories(code,title,parent_code,scope,created_at) VALUES(?,?,?,?,?)",
+            (code,title_value,parent_code,scope,now_iso())
+        )
+        con.execute(
+            "INSERT OR IGNORE INTO categories(code,title,emoji,scope,kind,parent_code) VALUES(?,?,?,?,?,?)",
+            (code,title_value,emoji,scope,"expense",parent_code)
+        )
+    return code
+
+def list_custom_categories(scope=None):
+    with connect() as con:
+        if scope:
+            return con.execute("SELECT * FROM custom_categories WHERE scope=? ORDER BY id", (scope,)).fetchall()
+        return con.execute("SELECT * FROM custom_categories ORDER BY id").fetchall()
