@@ -11,6 +11,7 @@ NBRB_URL = "https://api.nbrb.by/exrates/rates/{code}"
 _current_cache = {}
 _current_cache_time = 0.0
 _historical_cache = {}
+_rate_locks = {}
 _lock = asyncio.Lock()
 CACHE_TTL_SECONDS = 6 * 60 * 60
 
@@ -46,7 +47,7 @@ async def get_byn_rate(code, on_date):
     if key in _historical_cache:
         return _historical_cache[key]
 
-    async with _lock:
+    async with _rate_locks.setdefault(key, asyncio.Lock()):
         if key in _historical_cache:
             return _historical_cache[key]
         rate = await _fetch_rate(code, on_date)

@@ -10,7 +10,7 @@ from app.parser import IgnoredSms, parse_priorbank_sms, operation_type_from_pars
 
 
 def test_cash_withdrawal_wording():
-    raw='Karta 4***3730 13-08-26 09:53:20. Nalichnye v bankomate 600.00 BYN. BLR BANKOMAT N2 MAGAZIN SA. Balance: 1730.78 BYN Tel. 7299090'
+    raw='Karta 4***1234 13-08-26 09:53:20. Nalichnye v bankomate 600.00 BYN. BLR BANKOMAT N2 MAGAZIN SA. Balance: 1730.78 BYN Tel. 7000000'
     p=parse_priorbank_sms(raw)
     assert p.operation_hint=='cash'
     assert operation_type_from_parsed(p)=='cash_withdrawal'
@@ -20,7 +20,7 @@ def test_cash_withdrawal_wording():
 
 
 def test_byn_payment_santa():
-    raw='Karta 4***3730 13-08-26 10:00:38. Oplata 30.52 BYN. BLR MAGAZIN "SANTA-353". Balance: 1390.26 BYN Tel. 7299090'
+    raw='Karta 4***1234 13-08-26 10:00:38. Oplata 30.52 BYN. BLR MAGAZIN "SANTA-353". Balance: 1390.26 BYN Tel. 7000000'
     p=parse_priorbank_sms(raw)
     assert p.operation_hint=='payment'
     assert str(p.amount)=='30.52'
@@ -28,7 +28,7 @@ def test_byn_payment_santa():
 
 
 def test_usd_purchase():
-    raw='Karta 4***3730 05-08-26 10:23:44. Oplata 9.99 USD. IRL APPLE.COM/BILL. Balance: 24.73 BYN Tel. 7299090'
+    raw='Karta 4***1234 05-08-26 10:23:44. Oplata 9.99 USD. IRL APPLE.COM/BILL. Balance: 24.73 BYN Tel. 7000000'
     p=parse_priorbank_sms(raw)
     assert p.operation_hint=='payment'
     assert p.currency=='USD'
@@ -38,16 +38,16 @@ def test_usd_purchase():
 
 
 def test_usd_incoming_transfer():
-    raw='Karta 4***3730 11-08-26 21:45:53. Zachislenie perevoda 400.00 USD. BLR HANNA NOVIKAVA. Balance: 1463.52 BYN Tel. 7299090'
+    raw='Karta 4***1234 11-08-26 21:45:53. Zachislenie perevoda 400.00 USD. BLR TEST CLIENT. Balance: 1463.52 BYN Tel. 7000000'
     p=parse_priorbank_sms(raw)
     assert p.operation_hint=='income'
     assert p.currency=='USD'
     assert str(p.amount)=='400.00'
-    assert p.merchant=='HANNA NOVIKAVA'
+    assert p.merchant=='TEST CLIENT'
 
 
 def test_direct_card_credit_without_card_mask(monkeypatch):
-    raw='12/08 17:34. Na vashu kartu zachisleno 1755.00 BYN. Dostupnaja summa: 2413.97 BYN. Tel. 7299090'
+    raw='12/08 17:34. Na vashu kartu zachisleno 1755.00 BYN. Dostupnaja summa: 2413.97 BYN. Tel. 7000000'
     p=parse_priorbank_sms(raw)
     assert p.operation_hint=='income'
     assert p.direction=='in'
@@ -57,7 +57,7 @@ def test_direct_card_credit_without_card_mask(monkeypatch):
 
 
 def test_otp_is_ignored():
-    raw='Priorbank 05/08 10:10. Code: 537 po karte DK8683. Spravka: 80172899292'
+    raw='Priorbank 05/08 10:10. Code: 537 po karte DK1234. Spravka: 80000000000'
     try:
         parse_priorbank_sms(raw)
     except IgnoredSms:

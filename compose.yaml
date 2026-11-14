@@ -1,0 +1,13 @@
+services:
+  finance:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/finance-v3.db
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - finance_data:/data
+    restart: unless-stopped
+volumes:
+  finance_data:
