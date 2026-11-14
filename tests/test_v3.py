@@ -53,8 +53,8 @@ def test_limits_and_weekly_overlap(client):
     d=dash(c); l=next(x for x in d['limits'] if x['id']==main); assert l['spent']==40000 and l['remaining']==10000
     tx(c,'expense','family',50,cafe); tx(c,'expense','family',51,cafe)
     with L.db() as db:
-        alerts=L.rows(db,'SELECT threshold FROM v3_alerts WHERE limit_id=? ORDER BY threshold',(main,)); assert [a['threshold'] for a in alerts]==[70,90,100]
-        L.queue_alerts(db); assert db.execute('SELECT COUNT(*) FROM v3_alerts WHERE limit_id=?',(main,)).fetchone()[0]==3
+        alerts=L.rows(db,'SELECT tx_id FROM v31_purchase_alerts WHERE limit_id=? ORDER BY tx_id',(main,)); assert len(alerts)==4
+        L.queue_alerts(db); assert db.execute('SELECT COUNT(*) FROM v31_purchase_alerts WHERE limit_id=?',(main,)).fetchone()[0]==4
     q={'start':L.today().isoformat(),'end':L.today().isoformat(),'scope':'family','limit_id':main}; r=c.get('/api/report',params=q).json(); assert r['expense']==60100 and r['weeks'][0]['limited']==50100
     q.pop('limit_id'); r=c.get('/api/report',params=q).json(); assert r['weeks'][0]['limited']==60100
     tx(c,'refund','family',10,cafe); assert next(x for x in dash(c)['limits'] if x['id']==main)['spent']==49100
@@ -81,13 +81,13 @@ def test_notification_queue_and_delivery(client,monkeypatch):
     import asyncio
     c=client; food=cat(c,'food'); cafe=cat(c,'cafe'); l=limit(c,'Тест',100,[food]); tx(c,'expense','family',70,cafe)
     delivered=[]
-    async def send(text): delivered.append(text); return True
+    async def send(text,button=None): delivered.append(text); return True
     monkeypatch.setattr(M,'tg_send',send)
     asyncio.run(M.flush()); asyncio.run(M.flush())
     assert len(delivered)==1 and '30%' in delivered[0]
     tx(c,'expense','family',20,cafe); asyncio.run(M.flush()); assert len(delivered)==2 and '10%' in delivered[1]
-    tx(c,'expense','family',10,cafe); asyncio.run(M.flush()); assert len(delivered)==2
-    tx(c,'expense','family',1,cafe); asyncio.run(M.flush()); assert len(delivered)==3 and 'превышен' in delivered[2]
+    tx(c,'expense','family',10,cafe); asyncio.run(M.flush()); assert len(delivered)==3 and 'исчерпан' in delivered[2]
+    tx(c,'expense','family',1,cafe); asyncio.run(M.flush()); assert len(delivered)==4 and 'превышен' in delivered[3]
 
 def test_sms_without_fx_is_not_lost(client,monkeypatch):
     c=client
@@ -101,3 +101,89 @@ def test_sms_without_fx_is_not_lost(client,monkeypatch):
     async def conversion(amount,currency,on_date): return amount*3,Decimal('3')
     monkeypatch.setattr(M,'convert_foreign_to_byn',conversion); asyncio.run(M.backfill_fx())
     t=c.get('/api/transactions').json()[0]; assert t['amount']==2997 and t['status']=='pending'
+
+def test_saturday_reset_and_monthly_limit(client,monkeypatch):
+    from datetime import date
+    c=client; monkeypatch.setattr(L,'today',lambda:date(2026,11,13))
+    food=cat(c,'food'); cafe=cat(c,'cafe'); weekly=limit(c,'Неделя',100,[food])
+    monthly=c.post('/api/limits',json=dict(name='Месяц',amount=500,scope='family',category_ids=[food],start_month='2026-11',period='monthly')).json()['id']
+    tx(c,'expense','family',80,cafe,day='2026-11-13'); ls={l['id']:l for l in dash(c)['limits']}
+    assert ls[weekly]['period_start']=='2026-11-07' and ls[weekly]['period_end']=='2026-11-13' and ls[weekly]['remaining']==2000
+    monkeypatch.setattr(L,'today',lambda:date(2026,11,14))
+    ls={l['id']:l for l in dash(c)['limits']}; assert ls[weekly]['spent']==0 and ls[weekly]['month_spent']==8000 and ls[monthly]['spent']==8000
+    tx(c,'expense','family',25,cafe,day='2026-11-14'); ls={l['id']:l for l in dash(c)['limits']}; assert ls[weekly]['spent']==2500 and ls[monthly]['spent']==10500 and ls[weekly]['month_budget']==42857
+    r=c.get('/api/report',params={'start':'2026-11-13','end':'2026-11-14','limit_id':weekly}).json(); assert [w['week'] for w in r['weeks']]==['2026-11-07','2026-11-14']; assert [w['limited'] for w in r['weeks']]==[8000,2500]
+
+def test_form_login_deep_link_logout(client):
+    c=client; c.auth=None
+    r=c.get('/?transaction=123',follow_redirects=False); assert r.status_code==303 and 'login' in r.headers['location']
+    assert c.get('/login').status_code==200
+    r=c.post('/login',data={'username':'family','password':'wrong','next':'/?transaction=123'},follow_redirects=False); assert 'error=1' in r.headers['location']
+    r=c.post('/login',data={'username':'family','password':'web-secret','next':'/?transaction=123'},follow_redirects=False); assert r.headers['location']=='/?transaction=123' and 'HttpOnly' in r.headers['set-cookie']
+    assert c.get('/api/dashboard').status_code==200
+    assert c.post('/logout',headers={'Origin':'https://untrusted.example'}).status_code==403
+    assert c.post('/logout').status_code==200 and c.get('/api/dashboard').status_code==401
+    r=c.post('/login',data={'username':'family','password':'web-secret','next':'//evil.example'},follow_redirects=False); assert r.headers['location']=='/'
+
+
+def signed_telegram_data(uid=123456789, age=0, start='', token='123456:fake-bot-token'):
+    import hashlib, hmac, json, time
+    from urllib.parse import urlencode
+    fields={'auth_date':str(int(time.time())-age),'user':json.dumps({'id':uid,'first_name':'Test'},separators=(',',':')),'query_id':'test-query','signature':'example-third-party-signature'}
+    if start: fields['start_param']=start
+    key=hmac.new(b'WebAppData',token.encode(),hashlib.sha256).digest()
+    check='\n'.join(f'{k}={v}' for k,v in sorted(fields.items()))
+    fields['hash']=hmac.new(key,check.encode(),hashlib.sha256).hexdigest()
+    return urlencode(fields)
+
+
+def test_telegram_login_and_revocation(client,monkeypatch):
+    c=client; c.auth=None
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN','123456:fake-bot-token')
+    monkeypatch.setenv('ALLOWED_TELEGRAM_USER_IDS','123456789, 987654321')
+    assert c.get('/mini?next=%2F%3Ftransaction%3D42').status_code==200
+    assert 'telegram-web-app.js' in c.get('/mini').text
+    assert c.get('/api/dashboard').status_code==401
+    r=c.post('/api/auth/telegram',json={'init_data':signed_telegram_data(),'next':'/?transaction=42'})
+    assert r.status_code==200 and r.json()['next']=='/?transaction=42'
+    assert 'HttpOnly' in r.headers['set-cookie'] and 'SameSite=lax' in r.headers['set-cookie']
+    assert c.get('/api/dashboard').status_code==200
+    assert c.post('/logout',headers={'Origin':'https://evil.example'}).status_code==403
+    monkeypatch.setenv('ALLOWED_TELEGRAM_USER_IDS','987654321')
+    assert c.get('/api/dashboard').status_code==401
+    r=c.post('/api/auth/telegram',json={'init_data':signed_telegram_data(uid=987654321,start='tx_42')})
+    assert r.status_code==200 and r.json()['next']=='/?transaction=42'
+    assert c.post('/logout').status_code==200
+    assert c.get('/api/dashboard').status_code==401
+
+
+def test_telegram_rejects_untrusted_data(client,monkeypatch):
+    c=client; c.auth=None
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN','123456:fake-bot-token')
+    monkeypatch.setenv('ALLOWED_TELEGRAM_USER_IDS','123456789')
+    raw=signed_telegram_data()
+    for value in [raw.replace('123456789','987654321'),signed_telegram_data(age=301),signed_telegram_data(age=-120),raw+'&user=%7B%7D',signed_telegram_data(token='different'), 'user=%7B%22id%22%3A123456789%7D']:
+        r=c.post('/api/auth/telegram',json={'init_data':value}); assert r.status_code==401,r.text
+        assert 'finance_session' not in r.cookies
+    assert c.post('/api/auth/telegram',json={'init_data':signed_telegram_data(uid=987654321)}).status_code==403
+    assert c.post('/api/auth/telegram',json={'init_data':raw},headers={'Origin':'https://evil.example'}).status_code==403
+    monkeypatch.delenv('ALLOWED_TELEGRAM_USER_IDS')
+    assert c.post('/api/auth/telegram',json={'init_data':raw}).status_code==403
+    monkeypatch.setenv('ALLOWED_TELEGRAM_USER_IDS','123456789')
+    r=c.post('/api/auth/telegram',json={'init_data':raw,'next':'//evil.example'}); assert r.json()['next']=='/'
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN','rotated-token')
+    assert c.get('/api/dashboard').status_code==401
+
+
+def test_mini_app_buttons(monkeypatch):
+    monkeypatch.setenv('APP_BASE_URL','https://finance.example')
+    monkeypatch.setenv('TELEGRAM_CHAT_ID','123456789')
+    b=M.telegram_button('/?transaction=42','Разобрать'); assert b['web_app']['url']=='https://finance.example/mini?next=%2F%3Ftransaction%3D42'
+    monkeypatch.setenv('TELEGRAM_CHAT_ID','-100123456789')
+    monkeypatch.delenv('TELEGRAM_BOT_USERNAME',raising=False); monkeypatch.delenv('TELEGRAM_MINI_APP_SHORT_NAME',raising=False)
+    assert M.telegram_button('/?transaction=42')['url']=='https://finance.example/?transaction=42'
+    monkeypatch.setenv('TELEGRAM_BOT_USERNAME','family_finance_bot'); monkeypatch.setenv('TELEGRAM_MINI_APP_SHORT_NAME','finance')
+    assert M.telegram_button('/?transaction=42')['url']=='https://t.me/family_finance_bot/finance?startapp=tx_42'
+    assert M.telegram_button('/?section=limits')['url'].endswith('startapp=limits')
+    assert M.telegram_button()['url'].endswith('startapp=home')
+    monkeypatch.setenv('APP_BASE_URL','http://localhost:8000'); assert M.telegram_button() is None

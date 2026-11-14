@@ -37,6 +37,9 @@ def init():
         CREATE TABLE IF NOT EXISTS v3_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS v3_rules(merchant TEXT NOT NULL,kind TEXT NOT NULL,scope TEXT NOT NULL,category_id INTEGER NOT NULL REFERENCES v3_categories(id),PRIMARY KEY(merchant,kind));
         ''')
+        if 'period' not in {r['name'] for r in c.execute('PRAGMA table_info(v3_limits)')}:
+            c.execute("ALTER TABLE v3_limits ADD COLUMN period TEXT NOT NULL DEFAULT 'monthly'")
+        c.execute('CREATE TABLE IF NOT EXISTS v31_purchase_alerts(id INTEGER PRIMARY KEY, limit_id INTEGER NOT NULL, tx_id INTEGER NOT NULL, message TEXT NOT NULL, sent INTEGER DEFAULT 0, UNIQUE(limit_id,tx_id))')
         if not c.execute("SELECT 1 FROM v3_settings WHERE key='initialized'").fetchone():
             ids={}
             for x in CATEGORIES:
@@ -56,20 +59,41 @@ def descendants(c, ids):
         result=new
 def month_bounds(month):
     start=date.fromisoformat(month+'-01'); end=(start.replace(day=28)+timedelta(days=4)).replace(day=1); return start.isoformat(),end.isoformat()
-def limits_status(c,month):
-    start,end=month_bounds(month); out=[]
+def week_start(d): return d-timedelta(days=(d.weekday()-5)%7)
+def period_bounds(d,period):
+    if period=='weekly':
+        start=week_start(d); return start.isoformat(),(start+timedelta(days=7)).isoformat()
+    return month_bounds(d.strftime('%Y-%m'))
+def limit_spent(c,l,start,end):
+    ids=descendants(c,json.loads(l['category_ids']) if isinstance(l['category_ids'],str) else l['category_ids'])
+    return sum(t['amount']*(1 if t['kind']=='expense' else -1) for t in rows(c,"SELECT * FROM v3_transactions WHERE status='posted' AND kind IN ('expense','refund') AND scope=? AND day>=? AND day<?",(l['scope'],start,end)) if t['category_id'] in ids)
+def limits_status(c,month,as_of=None):
+    d=date.fromisoformat(as_of) if as_of else (today() if month==today().strftime('%Y-%m') else date.fromisoformat(month+'-01'))
+    out=[]
     for l in rows(c,'SELECT * FROM v3_limits WHERE active=1 AND start_month<=? ORDER BY id',(month,)):
-        ids=descendants(c,json.loads(l['category_ids'])); tx=rows(c,"SELECT * FROM v3_transactions WHERE status='posted' AND kind IN ('expense','refund') AND scope=? AND day>=? AND day<?",(l['scope'],start,end))
-        spent=sum(t['amount']*(1 if t['kind']=='expense' else -1) for t in tx if t['category_id'] in ids)
-        l.update(category_ids=json.loads(l['category_ids']),spent=spent,remaining=l['amount']-spent,percent=round(spent/l['amount']*100,2)); out.append(l)
+        start,end=period_bounds(d,l['period']); spent=limit_spent(c,l,start,end)
+        l.update(category_ids=json.loads(l['category_ids']),spent=spent,remaining=l['amount']-spent,percent=round(spent/l['amount']*100,2),period_start=start,period_end=(date.fromisoformat(end)-timedelta(days=1)).isoformat())
+        if l['period']=='weekly':
+            ms,me=month_bounds(d.strftime('%Y-%m')); days=(date.fromisoformat(me)-date.fromisoformat(ms)).days
+            budget=int((Decimal(l['amount'])*days/7).quantize(Decimal('1'),rounding=ROUND_HALF_UP)); actual=limit_spent(c,l,ms,me)
+            l.update(month_budget=budget,month_spent=actual,month_remaining=budget-actual)
+        out.append(l)
     return out
-def queue_alerts(c):
-    month=today().strftime('%Y-%m')
-    for l in limits_status(c,month):
-        for threshold in (70,90,100):
-            if (l['spent'] > l['amount'] if threshold==100 else l['spent']*100 >= l['amount']*threshold):
-                text=f"Лимит «{l['name']}»: {'превышен' if threshold==100 else 'осталось не более '+str(100-threshold)+'%'}\nПотрачено {l['spent']/100:.2f} из {l['amount']/100:.2f} BYN. Остаток {l['remaining']/100:.2f} BYN."
-                c.execute('INSERT OR IGNORE INTO v3_alerts(limit_id,month,threshold,message) VALUES(?,?,?,?)',(l['id'],month,threshold,text))
+def queue_alerts(c,tx_id=None):
+    # A purchase is notified once per matching limit; no periodic threshold spam.
+    if tx_id is None: return
+    t=c.execute("SELECT * FROM v3_transactions WHERE id=? AND status='posted' AND kind='expense'",(tx_id,)).fetchone()
+    if not t: return
+    d=date.fromisoformat(t['day'])
+    if d>today(): return
+    for l in limits_status(c,d.strftime('%Y-%m'),d.isoformat()):
+        if l['scope']!=t['scope'] or t['category_id'] not in descendants(c,l['category_ids']): continue
+        # Do not send stale warnings when historical transactions are entered.
+        if not (l['period_start']<=today().isoformat()<=l['period_end']): continue
+        remain=l['remaining']; spent=l['spent']; amount=l['amount']
+        status='🚨 Лимит превышен' if remain<0 else '⚠️ Лимит исчерпан' if remain==0 else '⚠️ Осталось не более 10%' if remain*100<=amount*10 else '⚠️ Осталось не более 30%' if remain*100<=amount*30 else 'Остаток лимита'
+        text=f"{status} «{l['name']}»\nПокупка: {t['amount']/100:.2f} BYN\nПериод: {l['period_start']} — {l['period_end']}\nПотрачено: {spent/100:.2f} из {amount/100:.2f} BYN\n{'Перерасход' if remain<0 else 'Осталось'}: {abs(remain)/100:.2f} BYN"
+        c.execute('INSERT OR IGNORE INTO v31_purchase_alerts(limit_id,tx_id,message) VALUES(?,?,?)',(l['id'],tx_id,text))
 def balances(c,end):
     result={s:0 for s in SCOPES}
     for t in rows(c,"SELECT * FROM v3_transactions WHERE status='posted' AND day<=?",(end,)):
@@ -94,11 +118,11 @@ def transactions(c,start,end,scope=None):
 def report(c,start,end,scope,limit_id=None):
     ts=[t for t in transactions(c,start,end,scope) if t['status']=='posted']; cats={r['id']:r for r in categories(c)}
     groups={}; income_groups={}; weeks={}; income=expense=0; incoming=outgoing=0; selected_cache={}
-    first=date.fromisoformat(start); last=date.fromisoformat(end); week=first-timedelta(days=first.weekday())
+    first=date.fromisoformat(start); last=date.fromisoformat(end); week=week_start(first)
     while week<=last:
         k=week.isoformat(); weeks[k]={'week':k,'total':0,'limited':0}; week+=timedelta(days=7)
     for t in ts:
-        a=t['amount']; k=t['kind']; d=date.fromisoformat(t['day']); week=(d-timedelta(days=d.weekday())).isoformat(); w=weeks.setdefault(week,{'week':week,'total':0,'limited':0})
+        a=t['amount']; k=t['kind']; d=date.fromisoformat(t['day']); week=week_start(d).isoformat(); w=weeks.setdefault(week,{'week':week,'total':0,'limited':0})
         if k=='income':
             income+=a; key=t['category_id'] or 0; cat=cats.get(key); g=income_groups.setdefault(key,{'id':key,'name':cat['name'] if cat else 'Без категории','amount':0,'ids':[]}); g['amount']+=a; g['ids'].append(t['id'])
         if k in ('expense','refund'):
