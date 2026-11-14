@@ -131,7 +131,8 @@ async def tg_send(text,button=None):
     if button: data['reply_markup']={'inline_keyboard':button if isinstance(button,list) else [[button]]}
     return await tg_request('sendMessage',data)
 def tx_keyboard(t):
-    return T.initial_keyboard(t,telegram_button(f'/?transaction={t["id"]}','Открыть в приложении'))
+    with L.db() as c: remembered=T.rule_matches(c,t)
+    return T.initial_keyboard(t,telegram_button(f'/?transaction={t["id"]}','Открыть в приложении'),remembered)
 async def setup_webhook():
     base=public_base()
     if not os.getenv('TELEGRAM_BOT_TOKEN'): return False
@@ -174,7 +175,7 @@ async def lifespan(app):
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError): await task
-app=FastAPI(title='Family Finance',version='3.3.0',lifespan=lifespan)
+app=FastAPI(title='Family Finance',version='3.3.2',lifespan=lifespan)
 app.mount('/static',StaticFiles(directory=static),name='static')
 @app.get('/')
 def index(request:Request,creds:HTTPBasicCredentials|None=Depends(security)):
@@ -213,7 +214,7 @@ def logout():
 @app.get('/health')
 def health():
     with L.db() as c: c.execute('SELECT 1')
-    return {'status':'ok','version':'3.3.0'}
+    return {'status':'ok','version':'3.3.2'}
 @app.get('/api/dashboard',dependencies=[Depends(auth)])
 async def dashboard():
     now=L.today().isoformat()
@@ -377,7 +378,7 @@ async def sms(v:SMS,request:Request):
         if amount is not None and p.operation_hint=='payment' and p.merchant:
             rule=c.execute('SELECT r.* FROM v3_rules r JOIN v3_categories c ON c.id=r.category_id WHERE r.merchant=? AND r.kind=? AND c.archived=0',(p.merchant.casefold(),kind)).fetchone()
             if rule: s=rule['scope']; cat=rule['category_id']; status='posted'
-        cur=c.execute('INSERT OR IGNORE INTO v3_transactions(day,kind,scope,category_id,amount,currency,original,description,status,sms_hash,hint,merchant,fx_rate,device,occurred_at,card_mask) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(p.occurred_at.date().isoformat(),kind,s,cat,amount,p.currency,money(p.amount),p.description,status,key,p.operation_hint,p.merchant,str(rate) if rate is not None else None,v.device,p.occurred_at.isoformat(sep=' '),p.card_mask))
+        cur=c.execute('INSERT OR IGNORE INTO v3_transactions(day,kind,scope,category_id,amount,currency,original,description,status,sms_hash,hint,merchant,fx_rate,device,occurred_at,card_mask,bank_direction,bank_balance_minor,bank_balance_currency,bank_amount_minor,bank_currency,bank_description) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(p.occurred_at.date().isoformat(),kind,s,cat,amount,p.currency,money(p.amount),p.description,status,key,p.operation_hint,p.merchant,str(rate) if rate is not None else None,v.device,p.occurred_at.isoformat(sep=' '),p.card_mask,p.direction if p.operation_hint!='unknown' else None,money(p.balance_after) if p.balance_after is not None else None,p.balance_currency,money(p.amount),p.currency,p.description))
         created=bool(cur.rowcount); id=cur.lastrowid if created else c.execute('SELECT id FROM v3_transactions WHERE sms_hash=?',(key,)).fetchone()[0]; L.queue_alerts(c,id) if created else None
     return {'ok':True,'duplicate':not created,'transaction_id':id}
 def allowed_chat(message):

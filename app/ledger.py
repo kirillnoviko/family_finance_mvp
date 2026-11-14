@@ -37,6 +37,11 @@ def init():
         CREATE TABLE IF NOT EXISTS v3_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS v3_rules(merchant TEXT NOT NULL,kind TEXT NOT NULL,scope TEXT NOT NULL,category_id INTEGER NOT NULL REFERENCES v3_categories(id),PRIMARY KEY(merchant,kind));
         ''')
+        # Preserve bank metadata independently of later accounting classification.
+        columns={r['name'] for r in c.execute('PRAGMA table_info(v3_transactions)')}
+        for name,typ in [('bank_direction','TEXT'),('bank_balance_minor','INTEGER'),('bank_balance_currency','TEXT'),('bank_amount_minor','INTEGER'),('bank_currency','TEXT'),('bank_description','TEXT')]:
+            if name not in columns:
+                c.execute(f'ALTER TABLE v3_transactions ADD COLUMN {name} {typ}')
         if 'period' not in {r['name'] for r in c.execute('PRAGMA table_info(v3_limits)')}:
             c.execute("ALTER TABLE v3_limits ADD COLUMN period TEXT NOT NULL DEFAULT 'monthly'")
         c.execute('CREATE TABLE IF NOT EXISTS v33_primary_limits(category_id INTEGER PRIMARY KEY REFERENCES v3_categories(id),limit_id INTEGER NOT NULL REFERENCES v3_limits(id))')

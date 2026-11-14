@@ -159,6 +159,7 @@ def _parse_card_message(text: str) -> ParsedSms | None:
         merchant=merchant(description) if description else None,
         balance_after=dec(match.group('balance')),
         raw_text=text,
+        balance_currency=match.group('balance_currency').upper(),
     )
 
 
@@ -186,6 +187,7 @@ def _parse_direct_income(text: str) -> ParsedSms | None:
         merchant='Зачисление на карту',
         balance_after=dec(match.group('balance')),
         raw_text=text,
+        balance_currency=match.group('balance_currency').upper(),
     )
 
 

@@ -14,6 +14,7 @@ class ParsedSms:
     merchant: str | None
     balance_after: Decimal | None
     raw_text: str
+    balance_currency: str | None = None
 
 @dataclass(slots=True)
 class Transaction:

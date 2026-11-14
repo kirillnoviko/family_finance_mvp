@@ -21,24 +21,63 @@ def button(tid,label,*parts):
     return {'text':str(label)[:64],'callback_data':callback(tid,*parts)}
 
 
-def bank_text(t):
-    status={'pending':'Ожидает классификации','posted':'Учтена','ignored':'Исключена'}.get(t['status'],t['status'])
-    return f"Банковская операция: {t['original']/100:.2f} {t['currency']}\n{t['description']}\n{t['occurred_at'] or t['day']} · {status}"
+def bank_text(t,c=None):
+    status={'pending':'💳 Банковская операция — на разбор','posted':'✅ Операция учтена','ignored':'🚫 Операция исключена'}.get(t['status'],t['status'])
+    direction=t.get('bank_direction')
+    # Old rows have no original direction; known parser hints are reliable.
+    if not direction:
+        direction={'income':'in','payment':'out','cash':'out','transfer':'out'}.get(t.get('hint'))
+    sign={'in':'+','out':'−'}.get(direction,'')
+    amount=t.get('bank_amount_minor')
+    if amount is None: amount=t['original']
+    currency=t.get('bank_currency') or t['currency']
+    lines=[status,'',f"💸 {sign}{amount/100:.2f} {currency}"]
+    description=t.get('bank_description') or t.get('description')
+    if description: lines.append(description[:1000])
+    lines.extend(['',f"📅 {t['occurred_at'] or t['day']}"])
+    if t.get('card_mask') and t['card_mask']!='priorbank-card': lines.append('💳 '+t['card_mask'])
+    if t.get('bank_balance_minor') is not None and t.get('bank_balance_currency'):
+        lines.append(f"Баланс после: {t['bank_balance_minor']/100:.2f} {t['bank_balance_currency']}")
+    if not direction: lines.append('Направление банковской операции не определено')
+    if t['status']=='posted':
+        if c is not None: lines.extend(['',summary(c,t)])
+        else:
+            with L.db() as conn: lines.extend(['',summary(conn,t)])
+    return '\n'.join(lines)
 
 
-def initial_keyboard(t,link=None):
+def remember_available(t):
+    return (t['status']=='posted' and t.get('merchant') and t.get('hint')=='payment'
+            and t.get('kind') in ('expense','income') and t.get('category_id'))
+
+
+def initial_keyboard(t,link=None,remembered=False):
     out=[]
     if t['status']=='pending': out.append([button(t['id'],'Разобрать прямо в Telegram','start')])
+    if remember_available(t) and not remembered: out.append([button(t['id'],'🧠 Запомнить магазин','remember')])
     if link: out.append([link])
     return out
 
 
 def summary(c,t):
-    cat=c.execute('SELECT name FROM v3_categories WHERE id=?',(t['category_id'],)).fetchone()
-    result=L.SCOPES.get(t['scope'],'')
-    if t['target']: result+=' → '+L.SCOPES.get(t['target'],'')
-    if cat: result+=' / '+cat['name']
-    return result
+    names={'family':'🏠 Семья','marketing':'📈 Маркетинг','reserve':'🛡 НЗ','investment':'📊 Инвестиции'}
+    scope=names.get(t['scope'], '—')
+    if t['target']: scope+=' → '+names.get(t['target'],'—')
+    lines=['Контур: '+scope, 'Тип: '+{'expense':'Расход','income':'Доход','refund':'Возврат','transfer':'Перевод между контурами','internal':'Внутренняя операция'}.get(t['kind'],t['kind'])]
+    cat_id=t['category_id']; path=[]; seen=set()
+    while cat_id and cat_id not in seen:
+        seen.add(cat_id)
+        cat=c.execute('SELECT name,parent_id FROM v3_categories WHERE id=?',(cat_id,)).fetchone()
+        if not cat: break
+        path.append(cat['name']); cat_id=cat['parent_id']
+    if path: lines.append('Категория: '+' / '.join(reversed(path)))
+    return '\n'.join(lines)
+
+
+def rule_matches(c,t):
+    if not remember_available(t): return False
+    rule=c.execute('SELECT scope,category_id FROM v3_rules WHERE merchant=? AND kind=?',(t['merchant'].casefold(),t['kind'])).fetchone()
+    return bool(rule and rule['scope']==t['scope'] and rule['category_id']==t['category_id'])
 
 
 def decode(data):
@@ -64,13 +103,18 @@ def screen(data,link_for):
         c.execute('BEGIN IMMEDIATE')
         t=c.execute('SELECT * FROM v3_transactions WHERE id=? AND sms_hash IS NOT NULL',(tid,)).fetchone()
         if not t: raise ValueError('Банковская операция не найдена')
-        t=dict(t); base=bank_text(t)
+        t=dict(t); base=bank_text(t,c)
         link=link_for(f'/?transaction={tid}','Открыть в приложении')
         app_rows=[[link]] if link else []
         back=lambda *parts: [button(tid,'← Назад',*parts)]
         if t['status']!='pending':
-            details=summary(c,t) if t['status']=='posted' else ''
-            return base+('\n'+details if details else ''),app_rows
+            if action=='remember' and not rest:
+                if not remember_available(t): raise ValueError('Эту операцию нельзя запомнить')
+                cat=c.execute('SELECT id FROM v3_categories WHERE id=? AND scope=? AND kind=? AND archived=0',(t['category_id'],t['scope'],t['kind'])).fetchone()
+                if not cat: raise ValueError('Категория недоступна')
+                c.execute('INSERT OR REPLACE INTO v3_rules VALUES(?,?,?,?)',(t['merchant'].casefold(),t['kind'],t['scope'],t['category_id']))
+            remembered=rule_matches(c,t)
+            return base+('\n\n🧠 Магазин запомнен' if remembered else ''),initial_keyboard(t,link,remembered)
         if action=='start' and not rest:
             return base+'\n\nВыберите тип операции:',[[button(tid,KIND_NAMES[k],'k',k)] for k in KINDS]+[[button(tid,'Исключить из учёта','ignore')]]+app_rows
         if action=='ignore' and not rest:
@@ -78,7 +122,7 @@ def screen(data,link_for):
         if action=='drop' and not rest:
             c.execute("UPDATE v3_transactions SET status='ignored' WHERE id=? AND status='pending'",(tid,))
             t['status']='ignored'
-            return bank_text(t),app_rows
+            return bank_text(t,c),app_rows
         if t['amount'] is None: raise ValueError('Курс валюты ещё не получен. Повторите позже или откройте приложение.')
         if not rest or rest[0] not in KINDS: raise ValueError('Неизвестный тип операции')
         k=rest[0]; kind=KINDS[k]
@@ -136,5 +180,5 @@ def screen(data,link_for):
                 c.execute('INSERT OR REPLACE INTO v3_rules VALUES(?,?,?,?)',(t['merchant'].casefold(),kind,scope,cat_id))
             L.queue_alerts(c,tid)
             t.update(status='posted',kind=kind,scope=scope,target=target,category_id=cat_id)
-            return bank_text(t)+'\n✅ '+summary(c,t),app_rows
+            return bank_text(t,c)+('\n\n🧠 Магазин запомнен' if rule_matches(c,t) else ''),initial_keyboard(t,link,rule_matches(c,t))
         raise ValueError('Некорректная кнопка')
