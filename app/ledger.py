@@ -39,6 +39,7 @@ def init():
         ''')
         if 'period' not in {r['name'] for r in c.execute('PRAGMA table_info(v3_limits)')}:
             c.execute("ALTER TABLE v3_limits ADD COLUMN period TEXT NOT NULL DEFAULT 'monthly'")
+        c.execute('CREATE TABLE IF NOT EXISTS v33_primary_limits(category_id INTEGER PRIMARY KEY REFERENCES v3_categories(id),limit_id INTEGER NOT NULL REFERENCES v3_limits(id))')
         c.execute('CREATE TABLE IF NOT EXISTS v31_purchase_alerts(id INTEGER PRIMARY KEY, limit_id INTEGER NOT NULL, tx_id INTEGER NOT NULL, message TEXT NOT NULL, sent INTEGER DEFAULT 0, UNIQUE(limit_id,tx_id))')
         if not c.execute("SELECT 1 FROM v3_settings WHERE key='initialized'").fetchone():
             ids={}
@@ -115,31 +116,82 @@ def investment(c,end):
     return dict(contributions=contributions,withdrawals=withdrawals,net=net,value=value,profit=profit,percent=round(profit/net*100,2) if profit is not None and net>0 else None,value_percent=round(value/net*100,2) if value is not None and net>0 else None,valuation_date=v['day'] if v else None)
 def transactions(c,start,end,scope=None):
     return rows(c,"SELECT t.*,cat.name category FROM v3_transactions t LEFT JOIN v3_categories cat ON cat.id=t.category_id WHERE day BETWEEN ? AND ? AND (? IS NULL OR t.scope=? OR t.target=?) ORDER BY day DESC,t.id DESC",(start,end,scope,scope,scope))
-def report(c,start,end,scope,limit_id=None):
+def ancestry(cats,cat_id):
+    result=[]; node=cats.get(cat_id)
+    while node and node['id'] not in result:
+        result.append(node['id']); node=cats.get(node['parent_id'])
+    return result
+
+def active_limits(c,month):
+    ls=rows(c,'SELECT * FROM v3_limits WHERE active=1 AND start_month<=? ORDER BY id',(month,))
+    for l in ls: l['category_ids']=json.loads(l['category_ids'])
+    return ls
+
+def match_limits(cats,ls,category_id,scope):
+    chain=ancestry(cats,category_id); ranked=[]
+    for l in ls:
+        if l['scope']!=scope: continue
+        distances=[chain.index(i) for i in l['category_ids'] if i in chain]
+        if distances: ranked.append((0 if l['period']=='weekly' else 1,min(distances),l['id'],l))
+    return [x[3] for x in sorted(ranked,key=lambda x:x[:3])]
+
+def primary_limit(cats,primary,category_id,matches):
+    by_id={l['id']:l for l in matches}
+    for i in ancestry(cats,category_id):
+        if primary.get(i) in by_id: return by_id[primary[i]]
+    return matches[0] if matches else None
+
+def category_limit_mapping(c):
+    cats={r['id']:r for r in categories(c)}; ls=active_limits(c,today().strftime('%Y-%m'))
+    primary={r['category_id']:r['limit_id'] for r in rows(c,'SELECT * FROM v33_primary_limits')}
+    result=[]
+    for cat in cats.values():
+        if cat['kind']!='expense' or cat['archived']: continue
+        matches=match_limits(cats,ls,cat['id'],cat['scope']); chosen=primary_limit(cats,primary,cat['id'],matches)
+        result.append(dict(category_id=cat['id'],limit_ids=[l['id'] for l in matches],primary_id=primary.get(cat['id']),effective_id=chosen['id'] if chosen else None))
+    return result
+
+def report(c,start,end,scope,limit_id=None,limit_period=None):
     ts=[t for t in transactions(c,start,end,scope) if t['status']=='posted']; cats={r['id']:r for r in categories(c)}
-    groups={}; income_groups={}; weeks={}; income=expense=0; incoming=outgoing=0; selected_cache={}
+    primary={r['category_id']:r['limit_id'] for r in rows(c,'SELECT * FROM v33_primary_limits')}
+    groups={}; income_groups={}; transfer_groups={}; limit_groups={}; weeks={}; income=expense=0; incoming=outgoing=0; cache={}; match_cache={}
     first=date.fromisoformat(start); last=date.fromisoformat(end); week=week_start(first)
     while week<=last:
-        k=week.isoformat(); weeks[k]={'week':k,'total':0,'limited':0}; week+=timedelta(days=7)
+        k=week.isoformat(); weeks[k]={'week':k,'total':0,'limited':0,'ids':[],'limited_ids':[]}; week+=timedelta(days=7)
     for t in ts:
-        a=t['amount']; k=t['kind']; d=date.fromisoformat(t['day']); week=week_start(d).isoformat(); w=weeks.setdefault(week,{'week':week,'total':0,'limited':0})
+        a=t['amount']; k=t['kind']; d=date.fromisoformat(t['day']); week=week_start(d).isoformat(); w=weeks[week]
         if k=='income':
             income+=a; key=t['category_id'] or 0; cat=cats.get(key); g=income_groups.setdefault(key,{'id':key,'name':cat['name'] if cat else 'Без категории','amount':0,'ids':[]}); g['amount']+=a; g['ids'].append(t['id'])
         if k in ('expense','refund'):
-            sign=1 if k=='expense' else -1; expense+=sign*a; w['total']+=sign*a
-            cat=cats.get(t['category_id']); root=cat
-            while root and root['parent_id']: root=cats.get(root['parent_id'])
+            sign=1 if k=='expense' else -1; expense+=sign*a; w['total']+=sign*a; w['ids'].append(t['id'])
+            chain=ancestry(cats,t['category_id']); root=cats.get(chain[-1]) if chain else None
             key=root['id'] if root else 0; g=groups.setdefault(key,{'id':key,'name':root['name'] if root else 'Без категории','amount':0,'ids':[]}); g['amount']+=sign*a; g['ids'].append(t['id'])
-            key=(d.strftime('%Y-%m'),t['scope'])
-            if key not in selected_cache:
-                selected=set()
-                for l in limits_status(c,key[0]):
-                    if l['scope']==t['scope'] and (limit_id is None or l['id']==limit_id): selected |= descendants(c,l['category_ids'])
-                selected_cache[key]=selected
-            selected=selected_cache[key]
-            if t['category_id'] in selected: w['limited']+=sign*a
+            m=d.strftime('%Y-%m'); cache_key=(m,t['scope'],t['category_id'])
+            if m not in cache: cache[m]=active_limits(c,m)
+            if cache_key not in match_cache: match_cache[cache_key]=match_limits(cats,cache[m],t['category_id'],t['scope'])
+            matches=match_cache[cache_key]
+            if any((limit_id is None or l['id']==limit_id) and (limit_period is None or l['period']==limit_period) for l in matches):
+                w['limited']+=sign*a; w['limited_ids'].append(t['id'])
+            # Exclusive analytic buckets, not a change to independent budget calculations.
+            chosen=primary_limit(cats,primary,t['category_id'],matches)
+            bucket='weekly' if chosen and chosen['period']=='weekly' else 'l'+str(chosen['id']) if chosen else 'c'+str(root['id'] if root else 0)
+            name='Все недельные лимиты' if bucket=='weekly' else chosen['name']+' · месяц' if chosen else (root['name'] if root else 'Без категории')
+            lg=limit_groups.setdefault(bucket,dict(id=bucket,name=name,amount=0,ids=[],subgroups={}))
+            lg['amount']+=sign*a; lg['ids'].append(t['id'])
+            if bucket=='weekly':
+                sg=lg['subgroups'].setdefault(chosen['id'],dict(id=chosen['id'],name=chosen['name'],amount=0,ids=[])); sg['amount']+=sign*a; sg['ids'].append(t['id'])
         if k=='transfer':
             if scope is None or t['target']==scope: incoming+=a
-            if scope is None or t['scope']==scope: outgoing+=a
+            if scope is None or t['scope']==scope:
+                outgoing+=a; dest=t['target']; g=transfer_groups.setdefault(dest,dict(id=dest,name=SCOPES[dest],amount=0,ids=[])); g['amount']+=a; g['ids'].append(t['id'])
     before=balances(c,(date.fromisoformat(start)-timedelta(days=1)).isoformat()) if start!='0001-01-01' else dict.fromkeys(SCOPES,0); after=balances(c,end)
-    return dict(income=income,expense=expense,transfer_in=incoming,transfer_out=outgoing,opening=before[scope] if scope else sum(before.values()),closing=after[scope] if scope else sum(after.values()),groups=sorted(groups.values(),key=lambda g:-g['amount']),income_groups=sorted(income_groups.values(),key=lambda g:-g['amount']),weeks=sorted(weeks.values(),key=lambda w:w['week']),transactions=ts)
+    for g in limit_groups.values(): g['subgroups']=sorted(g['subgroups'].values(),key=lambda x:-x['amount'])
+    opening=before[scope] if scope else sum(before.values()); closing=after[scope] if scope else sum(after.values())
+    opening_added=sum(t['amount'] for t in ts if t['kind']=='opening')
+    available=opening+opening_added+income+(incoming if scope else 0)
+    # All-contours view consolidates internal transfers instead of counting money twice.
+    destinations=[dict(g, type='transfer', name='В '+g['name']) for g in transfer_groups.values()] if scope else []
+    remaining=dict(id='remaining',name='Остаток на конец',amount=closing,ids=[],type='remaining')
+    distribution_categories=[dict(g,type='category') for g in sorted(groups.values(),key=lambda g:-g['amount'])]+destinations+[remaining]
+    distribution_limits=[dict(g,type='limit') for g in sorted(limit_groups.values(),key=lambda g:-g['amount'])]+destinations+[remaining]
+    return dict(available=available,opening_added=opening_added,distribution_categories=distribution_categories,distribution_limits=distribution_limits,income=income,expense=expense,transfer_in=incoming,transfer_out=outgoing,opening=opening,closing=closing,groups=sorted(groups.values(),key=lambda g:-g['amount']),income_groups=sorted(income_groups.values(),key=lambda g:-g['amount']),weeks=sorted(weeks.values(),key=lambda w:w['week']),transactions=ts,limit_groups=sorted(limit_groups.values(),key=lambda g:-g['amount']),transfer_groups=sorted(transfer_groups.values(),key=lambda g:-g['amount']))

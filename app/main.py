@@ -14,6 +14,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from app import ledger as L
+from app import telegram_ui as T
 from app.telegram_auth import allowed_ids, validate_init_data, TelegramAuthError
 from app.parser import parse_priorbank_sms, IgnoredSms
 from app.exchange import convert_foreign_to_byn, get_byn_rate
@@ -47,10 +48,10 @@ def session_ok(request):
         return int(expiry)>time.time() and hmac.compare_digest(sig,hmac.new(key,payload.encode(),hashlib.sha256).hexdigest())
     except (ValueError,TypeError): return False
 def check_origin(request):
-    origin=request.headers.get('origin'); host=request.headers.get('host',''); configured=urlsplit(os.getenv('APP_BASE_URL','')).netloc
+    origin=request.headers.get('origin'); host=request.headers.get('host',''); configured=urlsplit(public_base()).netloc
     if request.headers.get('sec-fetch-site')=='cross-site' or (origin and urlsplit(origin).netloc not in (host,configured)): raise HTTPException(403,'Недопустимый источник запроса')
 def set_session(response,request,telegram_id=None):
-    secure=request.url.scheme=='https' or request.headers.get('x-forwarded-proto')=='https' or os.getenv('APP_BASE_URL','').startswith('https://') or bool(os.getenv('RAILWAY_ENVIRONMENT'))
+    secure=request.url.scheme=='https' or request.headers.get('x-forwarded-proto')=='https' or bool(public_base()) or bool(os.getenv('RAILWAY_ENVIRONMENT'))
     response.set_cookie('finance_session',session_token(telegram_id),max_age=30*86400,httponly=True,secure=secure,samesite='lax',path='/')
     return response
 def auth(request:Request,creds:HTTPBasicCredentials|None=Depends(security)):
@@ -69,7 +70,7 @@ def safe_next(value):
     except ValueError: return '/'
 def mini_target(start_param):
     if re.fullmatch(r'tx_[1-9][0-9]{0,17}',start_param): return '/?transaction='+start_param[3:]
-    if start_param=='limits': return '/?section=limits'
+    if start_param in ('limits','pending'): return '/?section='+start_param
     return '/'
 def fail(msg): raise HTTPException(422,msg)
 def day(s):
@@ -83,30 +84,61 @@ def money(v,zero=False):
     except (ValueError,ArithmeticError): fail('Некорректная сумма')
     if a<0 or (a==0 and not zero): fail('Сумма должна быть положительной')
     return a
+def public_base():
+    # Railway supplies the public service domain when a domain is attached.
+    for value in (os.getenv('APP_BASE_URL',''),os.getenv('RAILWAY_PUBLIC_DOMAIN','')):
+        base=value.strip().rstrip('/')
+        if not base: continue
+        if '://' not in base and re.fullmatch(r'[A-Za-z0-9.-]+(?::[0-9]+)?',base): base='https://'+base
+        try:
+            parsed=urlsplit(base)
+            if parsed.scheme=='https' and parsed.hostname and not any(ch.isspace() for ch in base) and not parsed.username and not parsed.password and parsed.path in ('','/') and not parsed.query and not parsed.fragment:
+                return base
+        except ValueError: pass
+    return ''
+def webhook_secret():
+    configured=os.getenv('TELEGRAM_WEBHOOK_SECRET','')
+    if re.fullmatch(r'[A-Za-z0-9_-]{1,256}',configured): return configured
+    # Never send the bank API secret itself to Telegram.
+    return hmac.new(secret().encode(),('family-finance-webhook-v33|'+configured).encode(),hashlib.sha256).hexdigest()
 def telegram_button(target='/',label='Открыть приложение'):
-    base=os.getenv('APP_BASE_URL','').rstrip('/')
-    if not base.startswith('https://') or not urlsplit(base).netloc: return None
+    base=public_base()
+    if not base: return None
     target=safe_next(target); chat=os.getenv('TELEGRAM_CHAT_ID','').strip()
     if chat.isdigit() and int(chat)>0:
         return {'text':label,'web_app':{'url':base+'/mini?'+urlencode({'next':target})}}
-    # Inline web_app buttons are only supported in private user-bot chats.
-    # For groups use a named Mini App direct link, if configured.
-    bot=os.getenv('TELEGRAM_BOT_USERNAME','').lstrip('@'); name=os.getenv('TELEGRAM_MINI_APP_SHORT_NAME','')
+    bot=os.getenv('TELEGRAM_BOT_USERNAME','').strip().lstrip('@'); name=os.getenv('TELEGRAM_MINI_APP_SHORT_NAME','').strip()
     if re.fullmatch(r'[A-Za-z0-9_]{5,32}',bot) and re.fullmatch(r'[A-Za-z0-9_]{3,64}',name):
         start='home'
         if re.fullmatch(r'/\?transaction=[1-9][0-9]{0,17}',target): start='tx_'+target.split('=')[1]
-        elif target=='/?section=limits': start='limits'
+        elif target in ('/?section=limits','/?section=pending'): start=target.split('=')[1]
         return {'text':label,'url':f'https://t.me/{bot}/{name}?startapp={start}'}
     return {'text':label,'url':base+target}
-async def tg_send(text,button=None):
-    token=os.getenv('TELEGRAM_BOT_TOKEN'); chat=os.getenv('TELEGRAM_CHAT_ID')
-    if not token or not chat: return False
-    data={'chat_id':chat,'text':text}
-    if button: data['reply_markup']={'inline_keyboard':[[button]]}
+async def tg_request(method,data):
+    token=os.getenv('TELEGRAM_BOT_TOKEN')
+    if not token: return False
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            r=await client.post(f'https://api.telegram.org/bot{token}/sendMessage',json=data); r.raise_for_status(); return bool(r.json().get('ok'))
-    except Exception: log.warning('Telegram delivery failed'); return False
+            r=await client.post(f'https://api.telegram.org/bot{token}/{method}',json=data)
+            if r.is_success and r.json().get('ok'): return True
+            log.warning('Telegram %s failed (HTTP %s)',method,r.status_code)
+    except Exception: log.warning('Telegram %s delivery failed',method)
+    return False
+async def tg_send(text,button=None):
+    chat=os.getenv('TELEGRAM_CHAT_ID')
+    if not chat: return False
+    data={'chat_id':chat,'text':text}
+    if button: data['reply_markup']={'inline_keyboard':button if isinstance(button,list) else [[button]]}
+    return await tg_request('sendMessage',data)
+def tx_keyboard(t):
+    return T.initial_keyboard(t,telegram_button(f'/?transaction={t["id"]}','Открыть в приложении'))
+async def setup_webhook():
+    base=public_base()
+    if not os.getenv('TELEGRAM_BOT_TOKEN'): return False
+    if not base:
+        log.warning('Telegram webhook unavailable: set APP_BASE_URL or attach Railway public domain')
+        return False
+    return await tg_request('setWebhook',{'url':base+'/telegram/webhook','secret_token':webhook_secret(),'allowed_updates':['message','callback_query']})
 async def flush():
     with L.db() as c:
         alerts=L.rows(c,'SELECT * FROM v31_purchase_alerts WHERE sent=0 ORDER BY id'); pending=L.rows(c,'SELECT * FROM v3_transactions WHERE sms_hash IS NOT NULL AND notified=0 ORDER BY id')
@@ -114,8 +146,7 @@ async def flush():
         if await tg_send(a['message'],telegram_button('/?section=limits','Посмотреть лимиты')):
             with L.db() as c: c.execute('UPDATE v31_purchase_alerts SET sent=1 WHERE id=?',(a['id'],))
     for t in pending:
-        text=f"Банковская операция: {t['original']/100:.2f} {t['currency']}\n{t['description']}\n{t['occurred_at'] or t['day']} · {'Ожидает классификации' if t['status']=='pending' else 'Учтена'}"
-        if await tg_send(text,telegram_button(f'/?transaction={t["id"]}','Разобрать операцию' if t['status']=='pending' else 'Открыть операцию')):
+        if await tg_send(T.bank_text(t),tx_keyboard(t)):
             with L.db() as c: c.execute('UPDATE v3_transactions SET notified=1 WHERE id=?',(t['id'],))
 async def backfill_fx():
     with L.db() as c: missing=L.rows(c,"SELECT * FROM v3_transactions WHERE status='pending' AND amount IS NULL LIMIT 30")
@@ -124,9 +155,11 @@ async def backfill_fx():
         except Exception: continue
         with L.db() as c: c.execute("UPDATE v3_transactions SET amount=?,fx_rate=? WHERE id=? AND status='pending' AND amount IS NULL",(amount,str(rate),t['id']))
 async def worker():
-    ticks=0
+    ticks=0; webhook_ready=False
     while True:
         try:
+            if not webhook_ready and ticks%10==0:
+                webhook_ready=await setup_webhook()
             with L.db() as c: L.queue_alerts(c)
             await flush()
             if ticks%10==0: await backfill_fx()
@@ -141,7 +174,7 @@ async def lifespan(app):
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError): await task
-app=FastAPI(title='Family Finance',version='3.2.0',lifespan=lifespan)
+app=FastAPI(title='Family Finance',version='3.3.0',lifespan=lifespan)
 app.mount('/static',StaticFiles(directory=static),name='static')
 @app.get('/')
 def index(request:Request,creds:HTTPBasicCredentials|None=Depends(security)):
@@ -151,7 +184,7 @@ def index(request:Request,creds:HTTPBasicCredentials|None=Depends(security)):
 @app.get('/login')
 def login_page(next:str='/',error:int=0,manual:int=0):
     target=escape(safe_next(next),quote=True)
-    return HTMLResponse(f"""<!doctype html><html lang='ru'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Вход — Family Finance</title><link rel='stylesheet' href='/static/style.css'><script src='https://telegram.org/js/telegram-web-app.js' defer></script><script src='/static/login.js' defer></script></head><body><main style='max-width:420px;padding-top:12vh'><div class='card'><small>ЛИЧНЫЕ ФИНАНСЫ</small><h1>Family Finance</h1><p>Войдите в семейный бюджет</p><p id='telegram-status' role='status' hidden></p><form id='login-form' method='post' action='/login' class='fields' data-manual='{int(bool(manual or error))}'><input type='hidden' name='next' value='{target}'><label>Логин<input name='username' autocomplete='username' required></label><label>Пароль<input name='password' type='password' autocomplete='current-password' required></label>{'<p class="error">Неверный логин или пароль</p>' if error else ''}<button class='primary' type='submit'>Войти</button></form></div></main></body></html>""",headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
+    return HTMLResponse(f"""<!doctype html><html lang='ru'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Вход — Family Finance</title><link rel='stylesheet' href='/static/style.css?v=3.3.1'><script src='https://telegram.org/js/telegram-web-app.js' defer></script><script src='/static/login.js' defer></script></head><body><main style='max-width:420px;padding-top:12vh'><div class='card'><small>ЛИЧНЫЕ ФИНАНСЫ</small><h1>Family Finance</h1><p>Войдите в семейный бюджет</p><p id='telegram-status' role='status' hidden></p><form id='login-form' method='post' action='/login' class='fields' data-manual='{int(bool(manual or error))}'><input type='hidden' name='next' value='{target}'><label>Логин<input name='username' autocomplete='username' required></label><label>Пароль<input name='password' type='password' autocomplete='current-password' required></label>{'<p class="error">Неверный логин или пароль</p>' if error else ''}<button class='primary' type='submit'>Войти</button></form></div></main></body></html>""",headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
 @app.post('/login')
 async def login_submit(request:Request):
     from urllib.parse import parse_qs
@@ -180,7 +213,7 @@ def logout():
 @app.get('/health')
 def health():
     with L.db() as c: c.execute('SELECT 1')
-    return {'status':'ok','version':'3.2.0'}
+    return {'status':'ok','version':'3.3.0'}
 @app.get('/api/dashboard',dependencies=[Depends(auth)])
 async def dashboard():
     now=L.today().isoformat()
@@ -218,7 +251,7 @@ def save_category(v:Category,id:int|None=None):
         L.queue_alerts(c)
     return {'id':id}
 class Tx(BaseModel):
-    day:str; kind:str; scope:str; target:str|None=None; category_id:int|None=None; amount:Decimal; currency:str='BYN'; description:str=Field(default='',max_length=1000); remember:bool=False
+    day:str; kind:str; scope:str; target:str|None=None; category_id:int|None=None; amount:Decimal; currency:str='BYN'; description:str=Field(default='',max_length=1000); remember:bool=False; expected_status:str|None=None
 @app.get('/api/transactions',dependencies=[Depends(auth)])
 def get_tx(start:str='2000-01-01',end:str='2100-12-31',scope:str|None=None):
     start=day(start); end=day(end)
@@ -247,6 +280,7 @@ async def save_tx(v:Tx,id:int|None=None):
         if id:
             old=c.execute('SELECT * FROM v3_transactions WHERE id=?',(id,)).fetchone()
             if not old: raise HTTPException(404)
+            if v.expected_status is not None and old['status']!=v.expected_status: raise HTTPException(409,'Статус операции изменился. Закройте форму и откройте операцию заново.')
             c.execute("UPDATE v3_transactions SET day=?,kind=?,scope=?,target=?,category_id=?,amount=?,currency=?,original=?,description=?,fx_rate=?,status='posted' WHERE id=?",fields+(id,))
             if v.remember and old['merchant'] and v.kind in ('income','expense'):
                 c.execute('INSERT OR REPLACE INTO v3_rules VALUES(?,?,?,?)',(old['merchant'].casefold(),v.kind,v.scope,v.category_id))
@@ -285,6 +319,22 @@ def all_limits():
         result=L.rows(c,'SELECT * FROM v3_limits ORDER BY id')
         for r in result: r['category_ids']=json.loads(r['category_ids'])
         return result
+@app.get('/api/limits/mapping',dependencies=[Depends(auth)])
+def limit_mapping():
+    with L.db() as c: return L.category_limit_mapping(c)
+class PrimaryLimit(BaseModel):
+    limit_id:int|None=None
+@app.put('/api/limits/mapping/{category_id}',dependencies=[Depends(auth)])
+def set_primary_limit(category_id:int,v:PrimaryLimit):
+    with L.db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        item=next((r for r in L.category_limit_mapping(c) if r['category_id']==category_id),None)
+        if item is None: fail('Категория недоступна')
+        if v.limit_id is None: c.execute('DELETE FROM v33_primary_limits WHERE category_id=?',(category_id,))
+        else:
+            if v.limit_id not in item['limit_ids']: fail('Сначала включите категорию в этот лимит')
+            c.execute('INSERT INTO v33_primary_limits(category_id,limit_id) VALUES(?,?) ON CONFLICT(category_id) DO UPDATE SET limit_id=excluded.limit_id',(category_id,v.limit_id))
+    return {'ok':True}
 class Valuation(BaseModel):
     day:str; amount:Decimal; currency:str="BYN"
 @app.post('/api/investment/valuation',dependencies=[Depends(auth)])
@@ -300,12 +350,13 @@ async def valuation(v:Valuation):
         c.execute('INSERT INTO v3_valuations(day,amount,ledger_snapshot) VALUES(?,?,?) ON CONFLICT(day) DO UPDATE SET amount=excluded.amount,ledger_snapshot=excluded.ledger_snapshot',(d,a,L.balances(c,d)['investment']))
     return {'ok':True}
 @app.get('/api/report',dependencies=[Depends(auth)])
-def report(start:str,end:str,scope:str|None=None,limit_id:int|None=None):
+def report(start:str,end:str,scope:str|None=None,limit_id:int|None=None,limit_period:str|None=None):
     start=day(start); end=day(end)
     if start>end: fail('Неверный диапазон')
     if (date.fromisoformat(end)-date.fromisoformat(start)).days>3660: fail('Выберите период не больше 10 лет')
     if scope and scope not in L.SCOPES: fail('Неизвестный контур')
-    with L.db() as c: return L.report(c,start,end,scope,limit_id)
+    if limit_period not in (None,'weekly','monthly'): fail('Неизвестный период лимита')
+    with L.db() as c: return L.report(c,start,end,scope,limit_id,limit_period)
 class SMS(BaseModel):
     message:str=Field(min_length=1,max_length=5000); device:str=Field(default='wife',max_length=50)
 @app.post('/api/sms')
@@ -329,9 +380,46 @@ async def sms(v:SMS,request:Request):
         cur=c.execute('INSERT OR IGNORE INTO v3_transactions(day,kind,scope,category_id,amount,currency,original,description,status,sms_hash,hint,merchant,fx_rate,device,occurred_at,card_mask) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(p.occurred_at.date().isoformat(),kind,s,cat,amount,p.currency,money(p.amount),p.description,status,key,p.operation_hint,p.merchant,str(rate) if rate is not None else None,v.device,p.occurred_at.isoformat(sep=' '),p.card_mask))
         created=bool(cur.rowcount); id=cur.lastrowid if created else c.execute('SELECT id FROM v3_transactions WHERE sms_hash=?',(key,)).fetchone()[0]; L.queue_alerts(c,id) if created else None
     return {'ok':True,'duplicate':not created,'transaction_id':id}
+def allowed_chat(message):
+    chat=message.get('chat',{}).get('id')
+    return type(chat) is int and str(chat)==os.getenv('TELEGRAM_CHAT_ID','').strip()
 @app.post('/telegram/webhook')
 async def webhook(request:Request):
-    if not equal(request.headers.get('x-telegram-bot-api-secret-token',''),os.getenv('TELEGRAM_WEBHOOK_SECRET') or secret()): raise HTTPException(403)
+    if not equal(request.headers.get('x-telegram-bot-api-secret-token',''),webhook_secret()) or not secret(): raise HTTPException(403)
+    try: update=await request.json()
+    except ValueError: raise HTTPException(400,'Некорректный JSON')
+    if not isinstance(update,dict): raise HTTPException(400)
+    q=update.get('callback_query')
+    if isinstance(q,dict):
+        qid=q.get('id'); msg=q.get('message') or {}; uid=(q.get('from') or {}).get('id')
+        if not qid: return {'ok':True}
+        async def answer(text='',alert=False):
+            await tg_request('answerCallbackQuery',{'callback_query_id':qid,'text':text,'show_alert':alert})
+        if type(uid) is not int or uid not in allowed_ids() or not allowed_chat(msg):
+            await answer('Нет доступа к семейному бюджету.',True); return {'ok':True}
+        if not isinstance(q.get('data'),str) or not q['data'].startswith('ff:'):
+            await answer('Эта кнопка устарела. Используйте /pending для нового списка.',True); return {'ok':True}
+        try: text,keyboard=T.screen(q['data'],telegram_button)
+        except ValueError as e:
+            await answer(str(e),True); return {'ok':True}
+        await answer()
+        if msg.get('message_id'):
+            await tg_request('editMessageText',{'chat_id':msg['chat']['id'],'message_id':msg['message_id'],'text':text,'reply_markup':{'inline_keyboard':keyboard}})
+        return {'ok':True}
+    msg=update.get('message')
+    if isinstance(msg,dict) and allowed_chat(msg) and (msg.get('from') or {}).get('id') in allowed_ids():
+        text=msg.get('text',''); command=text.split(maxsplit=1)[0].split('@')[0] if text.strip() else ''
+        if command=='/pending':
+            with L.db() as c:
+                pending=L.rows(c,"SELECT * FROM v3_transactions WHERE status='pending' AND sms_hash IS NOT NULL ORDER BY day,id LIMIT 10")
+                count=c.execute("SELECT COUNT(*) FROM v3_transactions WHERE status='pending' AND sms_hash IS NOT NULL").fetchone()[0]
+            await tg_send(f'Операций на разбор: {count}. '+('Первые 10 ниже.' if count>10 else ''),telegram_button('/?section=pending','Все операции на разбор'))
+            for t in pending:
+                if await tg_send(T.bank_text(t),tx_keyboard(t)):
+                    with L.db() as c: c.execute('UPDATE v3_transactions SET notified=1 WHERE id=?',(t['id'],))
+        elif command in ('/start','/finance'):
+            buttons=[b for b in [telegram_button('/','Открыть приложение'),telegram_button('/?section=pending','Операции на разбор')] if b]
+            await tg_send('Family Finance. /pending — банковские операции на разбор.',[[b] for b in buttons])
     return {'ok':True}
 @app.get('/api/export.csv')
 def export(request:Request,creds:HTTPBasicCredentials|None=Depends(security)):
